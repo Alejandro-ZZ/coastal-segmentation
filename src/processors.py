@@ -10,6 +10,7 @@ from typing import Union
 
 import numpy
 import pandas
+import skimage
 from sklearn.base import ClassifierMixin, clone
 from sklearn.ensemble import RandomForestClassifier
 
@@ -441,21 +442,23 @@ class NeighborhoodExtractor:
 
 class PreprocessingBlock:
     """
-    Independent preprocessing block: colorspace conversion + optional Gaussian smoothing.
-
-    Configure state via fluent builder methods, then call :meth:`transform` to apply
-    the pipeline to a raw RGB image::
+    Independent preprocessing block pipeline. See the method ``transform()`` for the
+    applied sequence of transformations. Example use::
 
         block = PreprocessingBlock()
-        block.set_colorspace("HSV").set_gaussian(sigma=1.5)
-        preprocessed = block.transform(rgb_image)
+        block.set_colorspace("HSV").set_gaussian_sigma(sigma=1.5)
+        preprocessed_image = block.transform(rgb_image)
 
-    This block is created and owned by :class:`SegmentationProcessor` and is accessible
-    through ``processor.preprocessing``.
+    Notes
+    -----
+    *   Available builder methods are: ``set_colorspace()`` and ``set_gaussian_sigma()``.
+
+    *   By default, the block applies no color space conversion (i.e., `colorspace="RGB"`) and
+        no gaussian smoothing (i.e., `gaussian_sigma=0.0`).
+
+    *   This block is created and owned by `SegmentationProcessor` class and is accessible
+        through `processor.preprocessing`.
     """
-
-    _SUPPORTED_COLORSPACES = {"RGB", "YIQ", "HSV"}
-
     def __init__(self):
         self.colorspace: str = "RGB"
         self.gaussian_sigma: float = 0.0
@@ -463,95 +466,69 @@ class PreprocessingBlock:
     # ------------------------------------------------------------------
     # Builder methods (fluent interface)
     # ------------------------------------------------------------------
-
     def set_colorspace(self, colorspace: str) -> "PreprocessingBlock":
         """
-        Set the colorspace conversion applied before feature extraction.
-
-        Parameters
-        ----------
-        colorspace : str
-            One of ``"RGB"`` (no conversion), ``"HSV"``, or ``"YIQ"``.
-
-        Returns
-        -------
-        PreprocessingBlock
-            ``self``, for method chaining.
+        Set the colorspace conversion.
+        Must be one of the supported by `skimage.convert_colorspace()` function.
+        Use ``"RGB"`` to disable colorspace conversion (default).
         """
-        if colorspace not in self._SUPPORTED_COLORSPACES:
-            raise ValueError(
-                f"Unsupported colorspace '{colorspace}'. "
-                f"Choose from: {self._SUPPORTED_COLORSPACES}"
-            )
-        self.colorspace = colorspace
+        self.colorspace = colorspace.upper()
         return self
 
-    def set_gaussian(self, sigma: float) -> "PreprocessingBlock":
+    def set_gaussian_sigma(self, sigma: float) -> "PreprocessingBlock":
         """
-        Set the Gaussian smoothing standard deviation applied channel-wise.
-
-        Parameters
-        ----------
-        sigma : float
-            Smoothing strength. Use ``0.0`` to disable (default).
-
-        Returns
-        -------
-        PreprocessingBlock
-            ``self``, for method chaining.
+        Set the gaussian smoothing standard deviation applied channel-wise.
+        Use ``0.0`` to disable smoothing (default).
         """
         if sigma < 0.0:
-            raise ValueError("Gaussian sigma must be >= 0.0.")
+            raise ValueError("Gaussian sigma must be >= 0.0")
         self.gaussian_sigma = sigma
         return self
 
     # ------------------------------------------------------------------
     # Core method
     # ------------------------------------------------------------------
-
     def transform(self, rgb_image: numpy.ndarray) -> numpy.ndarray:
         """
-        Apply the configured preprocessing pipeline to an RGB image.
+        Apply the configured preprocessing pipeline to an RGB image in the following
+        steps sequence:
 
-        Steps
-        -----
-        1. Cast to ``float64`` and normalise to ``[0.0, 1.0]``.
-        2. Convert colorspace (if not ``"RGB"``).
-        3. Apply per-channel Gaussian blur (if ``gaussian_sigma > 0``).
+        * Cast to ``float64`` (normalized to `[-1.0, 1.0]` or `[0, 1.0]` depending on dtype of input)
+        * Convert colorspace (only if ``colorspace`` is not "RGB").
+        * Apply per-channel gaussian blur (only if ``gaussian_sigma`` > 0).
 
         Parameters
         ----------
         rgb_image : numpy.ndarray
-            Input RGB image of shape ``(H, W, 3)``, ``uint8`` or ``float``.
+            Input RGB image of shape `(height, width, 3)` and data type: `uint8` or `float`.
 
         Returns
         -------
         numpy.ndarray
-            Preprocessed image, ``float64``, shape ``(H, W, 3)``.
+            Preprocessed image of type `float64` and shape `(height, width, 3)`.
         """
-        import skimage.color
-        import skimage.filters
+        img_float = skimage.util.img_as_float64(image=rgb_image, force_copy=True)
 
-        img = rgb_image.astype(numpy.float64)
-        if img.max() > 1.0:
-            img /= 255.0
-
-        if self.colorspace == "HSV":
-            img = skimage.color.rgb2hsv(img)
-        elif self.colorspace == "YIQ":
-            img = skimage.color.rgb2yiq(img)
-        # "RGB" → no conversion
+        if self.colorspace != "RGB":
+            img_float = skimage.color.convert_colorspace(
+                arr=img_float,
+                fromspace="RGB",
+                tospace=self.colorspace
+            )
 
         if self.gaussian_sigma > 0.0:
-            img = skimage.filters.gaussian(img, sigma=self.gaussian_sigma, channel_axis=-1)
+            img_float = skimage.filters.gaussian(
+                image=img_float,
+                sigma=self.gaussian_sigma,
+                channel_axis=-1
+            )
 
-        return img
+        return img_float
 
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
-
-    def get_config(self) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """Return the current configuration as a JSON-serializable dict."""
         return {
             "colorspace": self.colorspace,
@@ -560,9 +537,10 @@ class PreprocessingBlock:
 
     def __repr__(self) -> str:
         return (
-            f"PreprocessingBlock("
-            f"colorspace='{self.colorspace}', "
-            f"gaussian_sigma={self.gaussian_sigma})"
+            "PreprocessingBlock("
+                f"colorspace='{self.colorspace}', "
+                f"gaussian_sigma={self.gaussian_sigma}"
+            ")"
         )
 
 
@@ -799,7 +777,7 @@ class SegmentationProcessor:
         # Configure preprocessing
         processor.preprocessing \\
             .set_colorspace("HSV") \\
-            .set_gaussian(sigma=1.5)
+            .set_gaussian_sigma(sigma=1.5)
 
         # Configure postprocessing
         processor.postprocessing \\
