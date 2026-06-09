@@ -31,7 +31,7 @@ class NeighborhoodExtractor:
 
     center_loc : str, optional
         Position of the center pixel value in the output feature vector.
-        Ignored if `include_center` is False.Possible values are:
+        Ignored if `include_center` is False. Possible values are:
 
         - "middle" (default): the center pixel value is placed in the middle of the feature vector
         - "beginning": the center pixel value is placed at the beginning of the feature vector
@@ -41,18 +41,26 @@ class NeighborhoodExtractor:
     *   The total size of the neighborhood matrix is (2*radius + 1)^2 where radius is defined as
         (n_neighbors + 1) ** 0.5 - 1) // 2`.
     """
+
+    _SUPPORTED_NEIGHBORS = {0, 8, 24}
+    _SUPPORTED_CENTER_LOCATIONS = {"middle", "beginning"}
+
     def __init__(
             self,
             n_neighbors: int,
             include_center: bool = True,
-            center_loc: Literal["middle", "beginning"] = "middle"
+            center_loc: str = "middle"
     ):
-        if n_neighbors not in [0, 8, 24]:
-            raise ValueError(f"Invalid number of neighbors ({n_neighbors}). Possible values are: [0, 8, 24]")
-        if include_center and center_loc not in ["middle", "beginning"]:
+        # Validate input parameters
+        if n_neighbors not in self._SUPPORTED_NEIGHBORS:
+            raise ValueError(
+                f"Invalid number of neighbors: {n_neighbors}. "
+                f"Possible values are: {self._SUPPORTED_NEIGHBORS}"
+            )
+        if include_center and center_loc not in self._SUPPORTED_CENTER_LOCATIONS:
             raise ValueError(
                 f"Invalid center pixel position ({center_loc}). "
-                f"Expected one of: 'middle' or 'beginning'."
+                f"Expected one of: {self._SUPPORTED_CENTER_LOCATIONS}."
             )
 
         # Positional indices of the central pixel from which its neighbors are extracted
@@ -67,9 +75,11 @@ class NeighborhoodExtractor:
 
     def __repr__(self):
         return (
-            f"NeighborhoodExtractor(n_neighbors={self.n_neighbors}, "
-            f"include_center={self.include_center}, "
-            f"center_loc='{self.center_loc}')"
+            "NeighborhoodExtractor("
+                f"n_neighbors={self.n_neighbors}, "
+                f"include_center={self.include_center}, "
+                f"center_loc='{self.center_loc}'"
+            ")"
         )
 
     def __str__(self):
