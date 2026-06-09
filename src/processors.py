@@ -1,10 +1,17 @@
 import logging
+from pathlib import Path
+from typing import Any
+from typing import Dict
 from typing import List
-from typing import Literal
 from typing import Optional
+from typing import Sequence
+from typing import Tuple
 from typing import Union
 
 import numpy
+from sklearn.ensemble import RandomForestClassifier
+
+import logging
 
 
 logger = logging.getLogger("Processors")
@@ -426,4 +433,821 @@ class NeighborhoodExtractor:
 
         return features
 
+
+
+# ==============================================================================
+# PREPROCESSING BLOCK
+# ==============================================================================
+
+class PreprocessingBlock:
+    """
+    Independent preprocessing block: colorspace conversion + optional Gaussian smoothing.
+
+    Configure state via fluent builder methods, then call :meth:`transform` to apply
+    the pipeline to a raw RGB image::
+
+        block = PreprocessingBlock()
+        block.set_colorspace("HSV").set_gaussian(sigma=1.5)
+        preprocessed = block.transform(rgb_image)
+
+    This block is created and owned by :class:`SegmentationProcessor` and is accessible
+    through ``processor.preprocessing``.
+    """
+
+    _SUPPORTED_COLORSPACES = {"RGB", "YIQ", "HSV"}
+
+    def __init__(self):
+        self.colorspace: str = "RGB"
+        self.gaussian_sigma: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Builder methods (fluent interface)
+    # ------------------------------------------------------------------
+
+    def set_colorspace(self, colorspace: str) -> "PreprocessingBlock":
+        """
+        Set the colorspace conversion applied before feature extraction.
+
+        Parameters
+        ----------
+        colorspace : str
+            One of ``"RGB"`` (no conversion), ``"HSV"``, or ``"YIQ"``.
+
+        Returns
+        -------
+        PreprocessingBlock
+            ``self``, for method chaining.
+        """
+        if colorspace not in self._SUPPORTED_COLORSPACES:
+            raise ValueError(
+                f"Unsupported colorspace '{colorspace}'. "
+                f"Choose from: {self._SUPPORTED_COLORSPACES}"
+            )
+        self.colorspace = colorspace
+        return self
+
+    def set_gaussian(self, sigma: float) -> "PreprocessingBlock":
+        """
+        Set the Gaussian smoothing standard deviation applied channel-wise.
+
+        Parameters
+        ----------
+        sigma : float
+            Smoothing strength. Use ``0.0`` to disable (default).
+
+        Returns
+        -------
+        PreprocessingBlock
+            ``self``, for method chaining.
+        """
+        if sigma < 0.0:
+            raise ValueError("Gaussian sigma must be >= 0.0.")
+        self.gaussian_sigma = sigma
+        return self
+
+    # ------------------------------------------------------------------
+    # Core method
+    # ------------------------------------------------------------------
+
+    def transform(self, rgb_image: numpy.ndarray) -> numpy.ndarray:
+        """
+        Apply the configured preprocessing pipeline to an RGB image.
+
+        Steps
+        -----
+        1. Cast to ``float64`` and normalise to ``[0.0, 1.0]``.
+        2. Convert colorspace (if not ``"RGB"``).
+        3. Apply per-channel Gaussian blur (if ``gaussian_sigma > 0``).
+
+        Parameters
+        ----------
+        rgb_image : numpy.ndarray
+            Input RGB image of shape ``(H, W, 3)``, ``uint8`` or ``float``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Preprocessed image, ``float64``, shape ``(H, W, 3)``.
+        """
+        import skimage.color
+        import skimage.filters
+
+        img = rgb_image.astype(numpy.float64)
+        if img.max() > 1.0:
+            img /= 255.0
+
+        if self.colorspace == "HSV":
+            img = skimage.color.rgb2hsv(img)
+        elif self.colorspace == "YIQ":
+            img = skimage.color.rgb2yiq(img)
+        # "RGB" → no conversion
+
+        if self.gaussian_sigma > 0.0:
+            img = skimage.filters.gaussian(img, sigma=self.gaussian_sigma, channel_axis=-1)
+
+        return img
+
+    # ------------------------------------------------------------------
+    # Introspection
+    # ------------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the current configuration as a JSON-serializable dict."""
+        return {
+            "colorspace": self.colorspace,
+            "gaussian_sigma": self.gaussian_sigma,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"PreprocessingBlock("
+            f"colorspace='{self.colorspace}', "
+            f"gaussian_sigma={self.gaussian_sigma})"
+        )
+
+
+# ==============================================================================
+# POSTPROCESSING BLOCK
+# ==============================================================================
+
+class PostprocessingBlock:
+    """
+    Independent postprocessing block: majority-vote smoothing + color visualization.
+
+    Owns **all** color-related configuration: class–color mapping, ignore index,
+    background color, and the majority filter footprint.
+
+    Configure state via fluent builder methods, then call :meth:`apply` on an
+    assembled label mask::
+
+        block = PostprocessingBlock(class_to_color={"Water": [0,0,255], "Sand": [255,255,0]})
+        block.set_majority_filter(numpy.ones((5, 5), dtype=bool))
+             .set_background((10, 10, 10))
+
+        result = block.apply(label_mask, roi_mask)
+        # result["labels"]       → 2-D int32 array
+        # result["color_labels"] → 3-D uint8 RGB array
+
+    This block is created and owned by :class:`SegmentationProcessor` and is accessible
+    through ``processor.postprocessing``.
+
+    Parameters
+    ----------
+    class_to_color : Dict[str, Sequence[int]]
+        Ordered mapping from class names to RGB colors (0–255 range).
+        Insertion order defines integer label indices (0, 1, 2, …).
+    """
+
+    def __init__(self, class_to_color: Dict[str, Sequence[int]]):
+        self.class_to_color: Dict[str, Sequence[int]] = dict(class_to_color)
+        self.label_to_color: Dict[int, List[int]] = {
+            i: list(color) for i, color in enumerate(class_to_color.values())
+        }
+        # Sentinel value assigned to pixels outside the ROI / not classified
+        self.ignore_index: int = len(class_to_color)
+        self.bg_color: Tuple[int, int, int] = (0, 0, 0)
+        self.majority_footprint: Optional[numpy.ndarray] = None
+
+    # ------------------------------------------------------------------
+    # Builder methods (fluent interface)
+    # ------------------------------------------------------------------
+
+    def set_background(self, color: Tuple[int, int, int]) -> "PostprocessingBlock":
+        """
+        Set the RGB color used for background / masked-out pixels in the visualization.
+
+        Parameters
+        ----------
+        color : Tuple[int, int, int]
+            RGB values in the range ``[0, 255]``.
+
+        Returns
+        -------
+        PostprocessingBlock
+            ``self``, for method chaining.
+        """
+        self.bg_color = tuple(color)
+        return self
+
+    def set_majority_filter(
+        self, footprint: Optional[numpy.ndarray]
+    ) -> "PostprocessingBlock":
+        """
+        Set the structuring element for majority-vote label smoothing.
+
+        Parameters
+        ----------
+        footprint : numpy.ndarray or None
+            2-D boolean array defining the filter neighborhood.
+            Pass ``None`` to disable the filter (default).
+
+        Returns
+        -------
+        PostprocessingBlock
+            ``self``, for method chaining.
+        """
+        self.majority_footprint = footprint
+        return self
+
+    # ------------------------------------------------------------------
+    # Core method
+    # ------------------------------------------------------------------
+
+    def apply(
+        self,
+        label_mask: numpy.ndarray,
+        roi_mask: Optional[numpy.ndarray] = None
+    ) -> dict:
+        """
+        Apply postprocessing to an assembled 2-D label mask.
+
+        Steps
+        -----
+        1. **Majority filter** (optional): replace each pixel with the most
+           common label in its neighbourhood, only inside the valid region.
+        2. **Color visualization**: map integer labels to RGB colors.
+
+        Parameters
+        ----------
+        label_mask : numpy.ndarray
+            2-D ``int32`` array of shape ``(H, W)``. Pixels outside the ROI
+            must already carry ``self.ignore_index``.
+
+        roi_mask : numpy.ndarray, optional
+            Boolean 2-D mask ``(H, W)``. When provided:
+
+            * The majority filter is applied only inside the valid region.
+            * ``ignore_index`` pixels receive ``bg_color`` in the visualization.
+
+        Returns
+        -------
+        dict
+            * ``"labels"``       – refined 2-D ``int32`` array ``(H, W)``.
+            * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``.
+        """
+        import skimage.filters.rank
+
+        # Work on a copy to avoid mutating the caller's array
+        label_mask = label_mask.copy()
+
+        # ── Majority filter (optional) ───────────────────────────────────
+        if self.majority_footprint is not None:
+            valid_region = roi_mask if roi_mask is not None else (label_mask != self.ignore_index)
+            label_refined = skimage.filters.rank.majority(
+                label_mask.astype(numpy.uint8),
+                footprint=self.majority_footprint
+            )
+            label_mask[valid_region] = label_refined[valid_region]
+
+        # ── Color visualization ──────────────────────────────────────────
+        color_map: Dict[int, Any] = dict(self.label_to_color)
+        if roi_mask is not None:
+            color_map[self.ignore_index] = list(self.bg_color)
+
+        color_labels = self._labels_to_rgb(label_mask, color_map)
+
+        return {
+            "labels": label_mask,
+            "color_labels": color_labels
+        }
+
+    # ------------------------------------------------------------------
+    # Introspection
+    # ------------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the current configuration as a JSON-serializable dict."""
+        return {
+            "class_to_color": {k: list(v) for k, v in self.class_to_color.items()},
+            "ignore_index": self.ignore_index,
+            "bg_color": list(self.bg_color),
+            "majority_footprint": (
+                self.majority_footprint.tolist()
+                if self.majority_footprint is not None
+                else None
+            ),
+        }
+
+    def __repr__(self) -> str:
+        fp_shape = (
+            str(self.majority_footprint.shape)
+            if self.majority_footprint is not None
+            else None
+        )
+        return (
+            f"PostprocessingBlock("
+            f"classes={list(self.class_to_color.keys())}, "
+            f"ignore_index={self.ignore_index}, "
+            f"bg_color={self.bg_color}, "
+            f"majority_footprint_shape={fp_shape})"
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _labels_to_rgb(
+        label_array: numpy.ndarray,
+        label_to_color: Dict[int, Sequence[int]]
+    ) -> numpy.ndarray:
+        """Convert an integer label array to a uint8 RGB image via a color-map dict."""
+        height, width = label_array.shape
+        color_image = numpy.zeros((height, width, 3), dtype=numpy.uint8)
+        for label, color in label_to_color.items():
+            color_image[label_array == label] = color
+        return color_image
+
+
+# ==============================================================================
+# SEGMENTATION PROCESSOR
+# ==============================================================================
+
+class SegmentationProcessor:
+    """
+    Pixel-wise image segmentation processor.
+
+    Composed of two configurable internal blocks and an internal Random Forest
+    classifier:
+
+    * ``preprocessing``  – :class:`PreprocessingBlock`  (colorspace, Gaussian blur)
+    * ``postprocessing`` – :class:`PostprocessingBlock` (majority filter, visualization)
+    * ``_classifier``    – ``RandomForestClassifier``   (owned directly by the processor)
+
+    Construct with the minimum required argument, then configure each block via
+    its builder interface::
+
+        processor = SegmentationProcessor(
+            class_to_color={"Water": [0, 0, 255], "Sand": [255, 255, 0]}
+        )
+
+        # Configure preprocessing
+        processor.preprocessing \\
+            .set_colorspace("HSV") \\
+            .set_gaussian(sigma=1.5)
+
+        # Configure postprocessing
+        processor.postprocessing \\
+            .set_majority_filter(numpy.ones((5, 5), dtype=bool)) \\
+            .set_background((10, 10, 10))
+
+        # Configure feature extraction and classifier (processor-level)
+        processor.set_neighbors(8).set_classifier(n_estimators=200, random_state=0)
+
+        # Train
+        processor.evaluate_classifier(images_path, df, do_train=True)
+
+        # Predict
+        result = processor.predict_image(rgb_image, roi_mask=mask)
+
+    Parameters
+    ----------
+    class_to_color : Dict[str, Sequence[int]]
+        Ordered mapping from class names to RGB colors (0–255 range). Forwarded
+        to the internal :class:`PostprocessingBlock`. Insertion order defines
+        integer label indices (0, 1, 2, …).
+
+    n_neighbors : int, optional
+        Initial number of neighboring pixels for feature extraction.
+        Must be 0, 8, or 24. Default is ``0``. Can be changed later via
+        :meth:`set_neighbors`.
+    """
+
+    def __init__(
+        self,
+        class_to_color: Dict[str, Sequence[int]],
+        n_neighbors: int = 0
+    ):
+        self.class_names: List[str] = list(class_to_color.keys())
+        self.n_neighbors: int = n_neighbors
+
+        # ── Internal processing blocks ──────────────────────────────────
+        self.preprocessing: PreprocessingBlock = PreprocessingBlock()
+        self.postprocessing: PostprocessingBlock = PostprocessingBlock(class_to_color)
+
+        # ── Feature extractor ───────────────────────────────────────────
+        self._extractor: NeighborhoodExtractor = NeighborhoodExtractor(
+            n_neighbors=n_neighbors,
+            include_center=True,
+            center_loc="middle"
+        )
+
+        # ── Classifier ──────────────────────────────────────────────────
+        self._classifier: RandomForestClassifier = RandomForestClassifier()
+
+        # ── Internal state ──────────────────────────────────────────────
+        self._training_metadata: Optional[dict] = None
+
+    # ------------------------------------------------------------------
+    # Fluent processor-level configuration
+    # (feature extraction and classifier are not part of either block)
+    # ------------------------------------------------------------------
+
+    def set_neighbors(self, n_neighbors: int) -> "SegmentationProcessor":
+        """
+        Set the neighborhood size for feature extraction.
+
+        Rebuilds the internal :class:`NeighborhoodExtractor`.
+
+        Parameters
+        ----------
+        n_neighbors : int
+            Must be ``0``, ``8``, or ``24``.
+
+        Returns
+        -------
+        SegmentationProcessor
+            ``self``, for method chaining.
+        """
+        if n_neighbors not in {0, 8, 24}:
+            raise ValueError("n_neighbors must be 0, 8, or 24.")
+        self.n_neighbors = n_neighbors
+        self._extractor = NeighborhoodExtractor(
+            n_neighbors=n_neighbors,
+            include_center=True,
+            center_loc="middle"
+        )
+        return self
+
+    def set_classifier(self, **kwargs) -> "SegmentationProcessor":
+        """
+        (Re-)configure the internal Random Forest classifier.
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments forwarded directly to
+            ``sklearn.ensemble.RandomForestClassifier``.
+
+        Returns
+        -------
+        SegmentationProcessor
+            ``self``, for method chaining.
+        """
+        self._classifier = RandomForestClassifier(**kwargs)
+        return self
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _build_feature_matrix(
+        self,
+        images_path: Path,
+        annotations_data: Any   # pandas.DataFrame
+    ) -> Tuple[numpy.ndarray, numpy.ndarray]:
+        """
+        Load annotated images, preprocess them via the preprocessing block,
+        extract neighborhood features, and return ``(X, y)``.
+        """
+        import skimage.io
+
+        all_features: List[numpy.ndarray] = []
+        all_labels: List[numpy.ndarray] = []
+
+        for image_file_name, group in annotations_data.groupby("ImageFile"):
+            rgb_image = skimage.io.imread(images_path / image_file_name)
+
+            # Delegate image preprocessing to the block
+            image = self.preprocessing.transform(rgb_image)
+
+            cx = group["Cx"].values.astype(int)
+            cy = group["Cy"].values.astype(int)
+            yx_coords = numpy.stack((cy, cx), axis=1)
+
+            features = self._extractor.transform(image=image, yx_coordinates=yx_coords)
+            labels = numpy.array(
+                [self.class_names.index(cls) for cls in group["Class"]],
+                dtype=int
+            )
+            all_features.append(features)
+            all_labels.append(labels)
+
+        return numpy.vstack(all_features), numpy.concatenate(all_labels)
+
+    def _assemble_label_mask(
+        self,
+        predicted_labels: numpy.ndarray,
+        yx_coords: numpy.ndarray,
+        height: int,
+        width: int,
+        roi_mask: Optional[numpy.ndarray]
+    ) -> numpy.ndarray:
+        """
+        Scatter a sparse 1-D ``predicted_labels`` array into a full ``(H, W)``
+        ``int32`` label mask. Pixels not present in ``yx_coords`` receive
+        ``postprocessing.ignore_index``.
+        """
+        ignore_index = self.postprocessing.ignore_index
+        if roi_mask is not None:
+            label_mask = numpy.full(
+                (height, width), fill_value=ignore_index, dtype=numpy.int32
+            )
+        else:
+            label_mask = numpy.empty((height, width), dtype=numpy.int32)
+        label_mask[yx_coords[:, 0], yx_coords[:, 1]] = predicted_labels
+        return label_mask
+
+    def _predict(
+        self,
+        X: numpy.ndarray,
+        rgb_image: numpy.ndarray,
+        yx_coords: numpy.ndarray,
+        class_priors: Optional[numpy.ndarray],
+        refine: Optional[str],
+        height: int,
+        width: int
+    ) -> numpy.ndarray:
+        """
+        Classify pixels in ``X``, applying the chosen refinement strategy.
+
+        Refinement strategies
+        ---------------------
+        * ``None``      – raw RF ``predict()``.
+        * ``"bayes"``   – RF posteriors multiplied by spatial ``class_priors``, re-normalised.
+        * ``"crf"``     – dense CRF inference (requires ``pydensecrf``).
+        """
+        if refine == "bayes" and class_priors is not None:
+            posteriors = self._classifier.predict_proba(X)
+            pixel_priors = class_priors[yx_coords[:, 0], yx_coords[:, 1], :]
+            posteriors = posteriors * pixel_priors
+            row_sums = posteriors.sum(axis=1, keepdims=True)
+            row_sums[row_sums == 0.0] = 1.0   # guard against all-zero prior
+            posteriors /= row_sums
+            return numpy.argmax(posteriors, axis=1)
+
+        elif refine == "crf":
+            return self._refine_crf(
+                rgb_image=rgb_image,
+                yx_coords=yx_coords,
+                X=X,
+                height=height,
+                width=width
+            )
+
+        else:
+            return self._classifier.predict(X)
+
+    def _refine_crf(
+        self,
+        rgb_image: numpy.ndarray,
+        yx_coords: numpy.ndarray,
+        X: numpy.ndarray,
+        height: int,
+        width: int
+    ) -> numpy.ndarray:
+        """Dense CRF inference over the full image grid. Requires ``pydensecrf``."""
+        try:
+            import pydensecrf.densecrf as dcrf
+            from pydensecrf.utils import unary_from_softmax
+        except ImportError:
+            raise ImportError(
+                "CRF refinement requires 'pydensecrf'. "
+                "Install it with: pip install pydensecrf"
+            )
+
+        n_classes = len(self.class_names)
+        proba = self._classifier.predict_proba(X)
+        prob_volume = numpy.zeros((height, width, n_classes), dtype=numpy.float32)
+        prob_volume[yx_coords[:, 0], yx_coords[:, 1]] = proba
+        prob_chw = numpy.clip(prob_volume.transpose(2, 0, 1), 1e-6, 1.0)
+
+        d = dcrf.DenseCRF2D(width, height, n_classes)
+        d.setUnaryEnergy(unary_from_softmax(prob_chw))
+        d.addPairwiseGaussian(sxy=3, compat=3)
+
+        img_u8 = (
+            rgb_image if rgb_image.dtype == numpy.uint8
+            else (rgb_image * 255).astype(numpy.uint8)
+        )
+        d.addPairwiseBilateral(sxy=40, srgb=10, rgbim=img_u8, compat=10)
+
+        Q = numpy.array(d.inference(5)).reshape(n_classes, height, width)
+        full_map = numpy.argmax(Q, axis=0)
+        return full_map[yx_coords[:, 0], yx_coords[:, 1]]
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def evaluate_classifier(
+        self,
+        images_path: Path,
+        annotations_data: Any,   # pandas.DataFrame
+        do_train: bool = False
+    ) -> dict:
+        """
+        Optionally train the classifier and evaluate it on annotated pixel data.
+
+        Parameters
+        ----------
+        images_path : Path
+            Directory containing the images referenced in ``annotations_data``.
+
+        annotations_data : pandas.DataFrame
+            DataFrame with columns: ``"ImageFile"``, ``"Cx"``, ``"Cy"``, ``"Class"``.
+
+        do_train : bool, optional
+            If ``True``, fit the classifier before evaluating. Default is ``False``.
+
+        Returns
+        -------
+        dict
+            * ``"data"``    – ``{"n_samples", "n_features", "labels"}``
+            * ``"timings"`` – ``{"features", "fit"`` (only when ``do_train=True``), ``"predict", "total"}``
+            * ``"metrics"`` – ``{"class_report": <sklearn classification_report dict>}``
+        """
+        import time
+        from datetime import datetime, timezone
+        from sklearn.metrics import classification_report
+
+        t_start = time.perf_counter()
+
+        t0 = time.perf_counter()
+        X, y = self._build_feature_matrix(images_path, annotations_data)
+        timings: Dict[str, float] = {"features": round(time.perf_counter() - t0, 4)}
+
+        if do_train:
+            t0 = time.perf_counter()
+            self._classifier.fit(X, y)
+            timings["fit"] = round(time.perf_counter() - t0, 4)
+
+        t0 = time.perf_counter()
+        y_pred = self._classifier.predict(X)
+        timings["predict"] = round(time.perf_counter() - t0, 4)
+        timings["total"] = round(time.perf_counter() - t_start, 4)
+
+        class_report = classification_report(
+            y_true=y,
+            y_pred=y_pred,
+            labels=list(range(len(self.class_names))),
+            target_names=self.class_names,
+            output_dict=True,
+            zero_division=0
+        )
+
+        results = {
+            "data": {
+                "n_samples": int(X.shape[0]),
+                "n_features": int(X.shape[1]),
+                "labels": sorted(int(v) for v in numpy.unique(y))
+            },
+            "timings": timings,
+            "metrics": {"class_report": class_report}
+        }
+
+        if do_train:
+            self._training_metadata = {
+                "date_UTC": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
+                **results
+            }
+
+        return results
+
+    def predict_image(
+        self,
+        rgb_image: numpy.ndarray,
+        roi_mask: Optional[numpy.ndarray] = None,
+        class_priors: Optional[numpy.ndarray] = None,
+        refine: Optional[str] = None,
+        save_file: Optional[Path] = None
+    ) -> dict:
+        """
+        Segment an image using the trained classifier.
+
+        Pipeline
+        --------
+        1. ``preprocessing.transform(rgb_image)``     – colorspace + blur
+        2. Feature extraction via ``_extractor``
+        3. Classification + optional refinement (``_predict``)
+        4. Assemble full-image label mask (``_assemble_label_mask``)
+        5. ``postprocessing.apply(label_mask, roi_mask)`` – filter + colorize
+
+        Parameters
+        ----------
+        rgb_image : numpy.ndarray
+            Input RGB image ``(H, W, 3)``, ``uint8`` or ``float``.
+
+        roi_mask : numpy.ndarray, optional
+            Boolean mask ``(H, W)``. Only ``True`` pixels are classified.
+
+        class_priors : numpy.ndarray, optional
+            Spatial prior probabilities ``(H, W, n_classes)``.
+            Required when ``refine="bayes"``.
+
+        refine : str, optional
+            ``None`` (raw RF), ``"bayes"``, or ``"crf"``.
+
+        save_file : Path, optional
+            If provided, saves the integer label array as a compressed NPZ
+            (key ``"labels"``) at this path.
+
+        Returns
+        -------
+        dict
+            * ``"labels"``       – 2-D ``int32`` array ``(H, W)``
+            * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``
+        """
+        height, width = rgb_image.shape[:2]
+
+        # ── 1. Preprocessing block ───────────────────────────────────────
+        image = self.preprocessing.transform(rgb_image)
+
+        # ── 2. Determine pixels to classify ─────────────────────────────
+        if roi_mask is not None:
+            yx_coords = numpy.argwhere(roi_mask)
+        else:
+            rows, cols = numpy.meshgrid(
+                numpy.arange(height), numpy.arange(width), indexing="ij"
+            )
+            yx_coords = numpy.stack((rows.ravel(), cols.ravel()), axis=1)
+
+        # ── 3. Feature extraction ────────────────────────────────────────
+        X = self._extractor.transform(image=image, yx_coordinates=yx_coords)
+
+        # ── 4. Prediction + refinement ───────────────────────────────────
+        predicted_labels = self._predict(
+            X=X,
+            rgb_image=rgb_image,
+            yx_coords=yx_coords,
+            class_priors=class_priors,
+            refine=refine,
+            height=height,
+            width=width
+        )
+
+        # ── 5. Assemble full-image label mask ────────────────────────────
+        label_mask = self._assemble_label_mask(
+            predicted_labels=predicted_labels,
+            yx_coords=yx_coords,
+            height=height,
+            width=width,
+            roi_mask=roi_mask
+        )
+
+        # ── 6. Postprocessing block ──────────────────────────────────────
+        result = self.postprocessing.apply(label_mask=label_mask, roi_mask=roi_mask)
+
+        # ── 7. Optional persistence ──────────────────────────────────────
+        if save_file is not None:
+            save_file = Path(save_file)
+            save_file.parent.mkdir(parents=True, exist_ok=True)
+            numpy.savez_compressed(save_file, labels=result["labels"])
+
+        return result
+
+    def to_pkl(self, filepath: Union[str, Path]) -> None:
+        """Serialize this processor to a compressed joblib PKL file."""
+        import joblib
+
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self, filepath)
+        logger.info(f"SegmentationProcessor saved: {filepath}")
+
+    def get_metadata(self) -> dict:
+        """
+        Return a JSON-serializable metadata dictionary.
+
+        Returns
+        -------
+        dict
+            * ``"preprocessing"``      – config from :class:`PreprocessingBlock`.
+            * ``"postprocessing"``     – config from :class:`PostprocessingBlock`.
+            * ``"feature_extraction"`` – ``{"n_neighbors"}``.
+            * ``"classifier"``         – type, scikit-learn version, hyperparameters.
+            * ``"training"``           – present only after ``evaluate_classifier(do_train=True)``.
+        """
+        import sklearn
+
+        metadata: Dict[str, Any] = {
+            "preprocessing": self.preprocessing.get_config(),
+            "postprocessing": self.postprocessing.get_config(),
+            "feature_extraction": {
+                "n_neighbors": self.n_neighbors,
+            },
+            "classifier": {
+                "type": type(self._classifier).__name__,
+                "framework": {
+                    "name": "scikit-learn",
+                    "version": sklearn.__version__,
+                },
+                "hyperparameters": self._classifier.get_params(),
+            },
+        }
+
+        if self._training_metadata is not None:
+            metadata["training"] = self._training_metadata
+
+        return metadata
+
+    def __repr__(self) -> str:
+        return (
+            f"SegmentationProcessor(\n"
+            f"  classes={self.class_names},\n"
+            f"  n_neighbors={self.n_neighbors},\n"
+            f"  preprocessing={self.preprocessing!r},\n"
+            f"  postprocessing={self.postprocessing!r}\n"
+            f")"
+        )
 
