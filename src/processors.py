@@ -9,9 +9,9 @@ from typing import Tuple
 from typing import Union
 
 import numpy
+import pandas
+from sklearn.base import ClassifierMixin, clone
 from sklearn.ensemble import RandomForestClassifier
-
-import logging
 
 
 logger = logging.getLogger("Processors")
@@ -574,13 +574,16 @@ class PostprocessingBlock:
     """
     Independent postprocessing block: majority-vote smoothing + color visualization.
 
-    Owns **all** color-related configuration: class–color mapping, ignore index,
-    background color, and the majority filter footprint.
+    Owns **all** color-related configuration: class names, per-class RGB colors,
+    ignore index, background color, and the majority filter footprint.
 
     Configure state via fluent builder methods, then call :meth:`apply` on an
     assembled label mask::
 
-        block = PostprocessingBlock(class_to_color={"Water": [0,0,255], "Sand": [255,255,0]})
+        block = PostprocessingBlock(
+            classes=["Water", "Sand"],
+            colors=[[0, 0, 255], [255, 255, 0]]
+        )
         block.set_majority_filter(numpy.ones((5, 5), dtype=bool))
              .set_background((10, 10, 10))
 
@@ -593,18 +596,28 @@ class PostprocessingBlock:
 
     Parameters
     ----------
-    class_to_color : Dict[str, Sequence[int]]
-        Ordered mapping from class names to RGB colors (0–255 range).
-        Insertion order defines integer label indices (0, 1, 2, …).
+    classes : List[str]
+        Ordered list of class names. Position defines the integer label index:
+        ``classes[0]`` → label ``0``, ``classes[1]`` → label ``1``, etc.
+
+    colors : List[Sequence[int]]
+        Ordered list of RGB colors (0–255 range), one per class.
+        Must have the same length as ``classes``.
     """
 
-    def __init__(self, class_to_color: Dict[str, Sequence[int]]):
-        self.class_to_color: Dict[str, Sequence[int]] = dict(class_to_color)
+    def __init__(self, classes: List[str], colors: List[Sequence[int]]):
+        if len(classes) != len(colors):
+            raise ValueError(
+                f"'classes' and 'colors' must have the same length. "
+                f"Got {len(classes)} classes and {len(colors)} colors."
+            )
+        self.classes: List[str] = list(classes)
+        self.colors: List[List[int]] = [list(c) for c in colors]
         self.label_to_color: Dict[int, List[int]] = {
-            i: list(color) for i, color in enumerate(class_to_color.values())
+            i: list(color) for i, color in enumerate(colors)
         }
         # Sentinel value assigned to pixels outside the ROI / not classified
-        self.ignore_index: int = len(class_to_color)
+        self.ignore_index: int = len(classes)
         self.bg_color: Tuple[int, int, int] = (0, 0, 0)
         self.majority_footprint: Optional[numpy.ndarray] = None
 
@@ -718,7 +731,8 @@ class PostprocessingBlock:
     def get_config(self) -> Dict[str, Any]:
         """Return the current configuration as a JSON-serializable dict."""
         return {
-            "class_to_color": {k: list(v) for k, v in self.class_to_color.items()},
+            "classes": list(self.classes),
+            "colors": [list(c) for c in self.colors],
             "ignore_index": self.ignore_index,
             "bg_color": list(self.bg_color),
             "majority_footprint": (
@@ -736,7 +750,7 @@ class PostprocessingBlock:
         )
         return (
             f"PostprocessingBlock("
-            f"classes={list(self.class_to_color.keys())}, "
+            f"classes={self.classes}, "
             f"ignore_index={self.ignore_index}, "
             f"bg_color={self.bg_color}, "
             f"majority_footprint_shape={fp_shape})"
@@ -772,13 +786,14 @@ class SegmentationProcessor:
 
     * ``preprocessing``  – :class:`PreprocessingBlock`  (colorspace, Gaussian blur)
     * ``postprocessing`` – :class:`PostprocessingBlock` (majority filter, visualization)
-    * ``_classifier``    – ``RandomForestClassifier``   (owned directly by the processor)
+    * ``classifier``    – ``RandomForestClassifier``   (owned directly by the processor)
 
-    Construct with the minimum required argument, then configure each block via
+    Construct with the minimum required arguments, then configure each block via
     its builder interface::
 
         processor = SegmentationProcessor(
-            class_to_color={"Water": [0, 0, 255], "Sand": [255, 255, 0]}
+            classes=["Water", "Sand", "Vegetation"],
+            colors=[[0, 0, 255], [255, 255, 0], [0, 128, 0]]
         )
 
         # Configure preprocessing
@@ -802,90 +817,61 @@ class SegmentationProcessor:
 
     Parameters
     ----------
-    class_to_color : Dict[str, Sequence[int]]
-        Ordered mapping from class names to RGB colors (0–255 range). Forwarded
-        to the internal :class:`PostprocessingBlock`. Insertion order defines
-        integer label indices (0, 1, 2, …).
+    n_neighbors : int
+        Number of neighboring pixels for feature extraction.
 
-    n_neighbors : int, optional
-        Initial number of neighboring pixels for feature extraction.
-        Must be 0, 8, or 24. Default is ``0``. Can be changed later via
-        :meth:`set_neighbors`.
+    classifier : ClassifierMixin
+        A scikit-learn classifier instance (e.g., `RandomForestClassifier()`).
+        Must support predicting probabilities via `predict_proba()` method for refinement strategies.
+
+    classes : List[str]
+        Segmentation class names. Position defines the classifier integer
+        label index:
+        ::
+            classes[0] --> 0,
+            classes[1] --> 1,
+            ...
+            classes[N] --> N
+
+    colors : List[Sequence[int]]
+        Segmentation RGB colors (0–255 range), one per class.
+        Must have the same length as ``classes``.
     """
 
     def __init__(
-        self,
-        class_to_color: Dict[str, Sequence[int]],
-        n_neighbors: int = 0
+            self,
+            n_neighbors: int,
+            classifier: ClassifierMixin,
+            classes: List[str],
+            colors: List[Sequence[int]],
     ):
-        self.class_names: List[str] = list(class_to_color.keys())
-        self.n_neighbors: int = n_neighbors
+        # Check for probability prediction support in the classifier
+        if not hasattr(classifier, "predict_proba"):
+            raise ValueError(
+                "Classifier must support probability predictions ('predict_proba()') "
+                "for refinement strategies."
+            )
 
-        # ── Internal processing blocks ──────────────────────────────────
-        self.preprocessing: PreprocessingBlock = PreprocessingBlock()
-        self.postprocessing: PostprocessingBlock = PostprocessingBlock(class_to_color)
+        # Classifier -------------------------------------
+        self.class_names: List[str] = list(classes)
+        self.classifier: ClassifierMixin = clone(classifier)
+        self.training_metadata: Optional[dict] = None
 
-        # ── Feature extractor ───────────────────────────────────────────
-        self._extractor: NeighborhoodExtractor = NeighborhoodExtractor(
+        # Feature extractor ------------------------------
+        self.feature_extractor: NeighborhoodExtractor = NeighborhoodExtractor(
             n_neighbors=n_neighbors,
             include_center=True,
             center_loc="middle"
         )
 
-        # ── Classifier ──────────────────────────────────────────────────
-        self._classifier: RandomForestClassifier = RandomForestClassifier()
+        # Processing blocks -----------------------------
+        self.preprocessing = PreprocessingBlock()
+        self.postprocessing = PostprocessingBlock(classes=classes, colors=colors)
 
-        # ── Internal state ──────────────────────────────────────────────
-        self._training_metadata: Optional[dict] = None
-
-    # ------------------------------------------------------------------
-    # Fluent processor-level configuration
-    # (feature extraction and classifier are not part of either block)
-    # ------------------------------------------------------------------
-
-    def set_neighbors(self, n_neighbors: int) -> "SegmentationProcessor":
-        """
-        Set the neighborhood size for feature extraction.
-
-        Rebuilds the internal :class:`NeighborhoodExtractor`.
-
-        Parameters
-        ----------
-        n_neighbors : int
-            Must be ``0``, ``8``, or ``24``.
-
-        Returns
-        -------
-        SegmentationProcessor
-            ``self``, for method chaining.
-        """
-        if n_neighbors not in {0, 8, 24}:
-            raise ValueError("n_neighbors must be 0, 8, or 24.")
-        self.n_neighbors = n_neighbors
-        self._extractor = NeighborhoodExtractor(
-            n_neighbors=n_neighbors,
-            include_center=True,
-            center_loc="middle"
-        )
-        return self
-
-    def set_classifier(self, **kwargs) -> "SegmentationProcessor":
-        """
-        (Re-)configure the internal Random Forest classifier.
-
-        Parameters
-        ----------
-        **kwargs
-            Keyword arguments forwarded directly to
-            ``sklearn.ensemble.RandomForestClassifier``.
-
-        Returns
-        -------
-        SegmentationProcessor
-            ``self``, for method chaining.
-        """
-        self._classifier = RandomForestClassifier(**kwargs)
-        return self
+    @property
+    def n_neighbors(self) -> int:
+        """Number of neighboring pixels used for feature extraction."""
+        return self.feature_extractor.n_neighbors
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -894,7 +880,7 @@ class SegmentationProcessor:
     def _build_feature_matrix(
         self,
         images_path: Path,
-        annotations_data: Any   # pandas.DataFrame
+        annotations_data: pandas.DataFrame
     ) -> Tuple[numpy.ndarray, numpy.ndarray]:
         """
         Load annotated images, preprocess them via the preprocessing block,
@@ -915,7 +901,7 @@ class SegmentationProcessor:
             cy = group["Cy"].values.astype(int)
             yx_coords = numpy.stack((cy, cx), axis=1)
 
-            features = self._extractor.transform(image=image, yx_coordinates=yx_coords)
+            features = self.feature_extractor.transform(image=image, yx_coordinates=yx_coords)
             labels = numpy.array(
                 [self.class_names.index(cls) for cls in group["Class"]],
                 dtype=int
@@ -968,7 +954,7 @@ class SegmentationProcessor:
         * ``"crf"``     – dense CRF inference (requires ``pydensecrf``).
         """
         if refine == "bayes" and class_priors is not None:
-            posteriors = self._classifier.predict_proba(X)
+            posteriors = self.classifier.predict_proba(X)
             pixel_priors = class_priors[yx_coords[:, 0], yx_coords[:, 1], :]
             posteriors = posteriors * pixel_priors
             row_sums = posteriors.sum(axis=1, keepdims=True)
@@ -986,7 +972,7 @@ class SegmentationProcessor:
             )
 
         else:
-            return self._classifier.predict(X)
+            return self.classifier.predict(X)
 
     def _refine_crf(
         self,
@@ -1007,7 +993,7 @@ class SegmentationProcessor:
             )
 
         n_classes = len(self.class_names)
-        proba = self._classifier.predict_proba(X)
+        proba = self.classifier.predict_proba(X)
         prob_volume = numpy.zeros((height, width, n_classes), dtype=numpy.float32)
         prob_volume[yx_coords[:, 0], yx_coords[:, 1]] = proba
         prob_chw = numpy.clip(prob_volume.transpose(2, 0, 1), 1e-6, 1.0)
@@ -1069,11 +1055,11 @@ class SegmentationProcessor:
 
         if do_train:
             t0 = time.perf_counter()
-            self._classifier.fit(X, y)
+            self.classifier.fit(X, y)
             timings["fit"] = round(time.perf_counter() - t0, 4)
 
         t0 = time.perf_counter()
-        y_pred = self._classifier.predict(X)
+        y_pred = self.classifier.predict(X)
         timings["predict"] = round(time.perf_counter() - t0, 4)
         timings["total"] = round(time.perf_counter() - t_start, 4)
 
@@ -1097,7 +1083,7 @@ class SegmentationProcessor:
         }
 
         if do_train:
-            self._training_metadata = {
+            self.training_metadata = {
                 "date_UTC": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
                 **results
             }
@@ -1118,7 +1104,7 @@ class SegmentationProcessor:
         Pipeline
         --------
         1. ``preprocessing.transform(rgb_image)``     – colorspace + blur
-        2. Feature extraction via ``_extractor``
+        2. Feature extraction via ``feature_extractor``
         3. Classification + optional refinement (``_predict``)
         4. Assemble full-image label mask (``_assemble_label_mask``)
         5. ``postprocessing.apply(label_mask, roi_mask)`` – filter + colorize
@@ -1163,7 +1149,7 @@ class SegmentationProcessor:
             yx_coords = numpy.stack((rows.ravel(), cols.ravel()), axis=1)
 
         # ── 3. Feature extraction ────────────────────────────────────────
-        X = self._extractor.transform(image=image, yx_coordinates=yx_coords)
+        X = self.feature_extractor.transform(image=image, yx_coordinates=yx_coords)
 
         # ── 4. Prediction + refinement ───────────────────────────────────
         predicted_labels = self._predict(
@@ -1227,17 +1213,17 @@ class SegmentationProcessor:
                 "n_neighbors": self.n_neighbors,
             },
             "classifier": {
-                "type": type(self._classifier).__name__,
+                "type": type(self.classifier).__name__,
                 "framework": {
                     "name": "scikit-learn",
                     "version": sklearn.__version__,
                 },
-                "hyperparameters": self._classifier.get_params(),
+                "hyperparameters": self.classifier.get_params(),
             },
         }
 
-        if self._training_metadata is not None:
-            metadata["training"] = self._training_metadata
+        if self.training_metadata is not None:
+            metadata["training"] = self.training_metadata
 
         return metadata
 
