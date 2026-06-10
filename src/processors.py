@@ -8,6 +8,8 @@ from typing import Sequence
 from typing import Tuple
 from typing import Union
 
+import joblib
+import matplotlib.pyplot as plt
 import numpy
 import pandas
 import skimage
@@ -528,7 +530,7 @@ class PreprocessingBlock:
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
-    def to_dict(self) -> Dict[str, Any]:
+    def to_json(self) -> Dict[str, Any]:
         """Return the current configuration as a JSON-serializable dict."""
         return {
             "colorspace": self.colorspace,
@@ -555,7 +557,6 @@ class PostprocessingBlock:
     assembled label mask::
 
         block = PostprocessingBlock(
-            classes=["Water", "Sand"],
             colors=[[0, 0, 255], [255, 255, 0]]
         )
         block.set_majority_filter(numpy.ones((5, 5), dtype=bool))
@@ -570,31 +571,19 @@ class PostprocessingBlock:
 
     Parameters
     ----------
-    classes : List[str]
-        Ordered list of class names. Position defines the integer label index:
-        ``classes[0]`` → label ``0``, ``classes[1]`` → label ``1``, etc.
-
     colors : List[Sequence[int]]
-        Ordered list of RGB colors (0–255 range), one per class.
-        Must have the same length as ``classes``.
+        Ordered list of RGB colors (0–255 range), one per class. The index of each color
+        corresponds to the integer label assigned to that class in the predicted label mask.
     """
-
-    def __init__(self, classes: List[str], colors: List[Sequence[int]]):
-        # Check for input sequences
-        if len(classes) != len(colors):
-            raise ValueError(
-                f"'classes' and 'colors' must have the same length. "
-                f"Got: {len(classes)} classes and {len(colors)} colors."
-            )
+    def __init__(self, colors: List[Sequence[int]]):
+        # Check input colors
         for color in colors:
             self._check_color(color)
             if tuple(color) == (0, 0, 0):
                 raise ValueError("Class colors cannot be black (0, 0, 0) as it is reserved for background.")
 
-        self.classes: List[str] = list(classes)
         self.colors: List[tuple] = [tuple(c) for c in colors]
-
-        self.ignore_index: int = len(classes)
+        self.ignore_index: int = len(colors)
         self._bg_color: Tuple[int, int, int] = (0, 0, 0)
         self._majority_footprint: Optional[numpy.ndarray] = None
         self.label_to_color: Dict[int, List[int]] = {i: list(color) for i, color in enumerate(colors)}
@@ -610,18 +599,6 @@ class PostprocessingBlock:
             if not (0 <= c <= 255):
                 raise ValueError(f"Color values must be in the range [0, 255]. Got: {color}")
 
-    @staticmethod
-    def _labels_to_rgb(
-            label_array: numpy.ndarray,
-            label_to_color: Dict[int, Sequence[int]]
-    ) -> numpy.ndarray:
-        """Convert an integer label array to a uint8 RGB image via a color-map dict."""
-        height, width = label_array.shape
-        color_image = numpy.zeros((height, width, 3), dtype=numpy.uint8)
-        for label, color in label_to_color.items():
-            color_image[label_array == label] = color
-        return color_image
-
     def _check_predicted_proba(self, predicted_proba: numpy.ndarray):
         if not isinstance(predicted_proba, numpy.ndarray):
             raise ValueError(f"Predicted probabilities must be a numpy array. Got: {type(predicted_proba)}")
@@ -634,10 +611,10 @@ class PostprocessingBlock:
                 f"Predicted probabilities must be a 3D array of shape (H, W, num_classes). "
                 f"Got: {predicted_proba.shape}"
             )
-        if predicted_proba.shape[2] != len(self.classes):
+        if predicted_proba.shape[2] != len(self.colors):
             raise ValueError(
                 f"The last dimension of predicted probabilities must match the number of classes "
-                f"({len(self.classes)}). Got: {predicted_proba.shape[2]} classes."
+                f"({len(self.colors)}). Got: {predicted_proba.shape[2]} classes."
             )
         if (predicted_proba < 0).any() or (predicted_proba > 1).any():
             raise ValueError(
@@ -796,9 +773,8 @@ class PostprocessingBlock:
         color_palette = numpy.array(all_colors, dtype=numpy.uint8)
         color_labels = color_palette[predicted_labels]
 
-        # TODO: Overlay image
+        # TODO: Overlay image ("overlay")
 
-        # TODO: ['image', 'labels', 'color_labels', 'overlay', 'classes', 'original_image']
         return {
             "labels": predicted_labels,
             "color_labels": color_labels
@@ -901,13 +877,12 @@ class SegmentationProcessor:
         Segmentation RGB colors (0–255 range), one per class.
         Must have the same length as ``classes``.
     """
-
     def __init__(
             self,
             n_neighbors: int,
             classifier: ClassifierMixin,
             classes: List[str],
-            colors: List[Sequence[int]],
+            colors: Optional[List[Sequence[int]]] = None,
     ):
         # Check for probability prediction support in the classifier
         if not hasattr(classifier, "predict_proba"):
@@ -915,6 +890,13 @@ class SegmentationProcessor:
                 "Classifier must support probability predictions ('predict_proba()') "
                 "for refinement strategies."
             )
+
+        # Create a default color palette
+        if colors is None:
+            colors = self._create_color_palette(num_classes=len(classes))
+        # Check input colors
+        elif len(colors) != len(classes):
+            raise ValueError(f"Number of colors ({len(colors)}) and classes ({len(classes)}) missmatch")
 
         # Classifier -------------------------------------
         self.class_names: List[str] = list(classes)
@@ -930,7 +912,7 @@ class SegmentationProcessor:
 
         # Processing blocks -----------------------------
         self.preprocessing = PreprocessingBlock()
-        self.postprocessing = PostprocessingBlock(classes=classes, colors=colors)
+        self.postprocessing = PostprocessingBlock(colors=colors)
 
     @property
     def n_neighbors(self) -> int:
@@ -938,8 +920,18 @@ class SegmentationProcessor:
         return self.feature_extractor.n_neighbors
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Internal helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _create_color_palette(num_classes: int) -> List[Sequence[int]]:
+        """Generate a default color palette for the given number of classes."""
+        # Colormap and indices for color generation
+        cmap = plt.get_cmap(name="tab10")
+        indices = numpy.arange(num_classes) % 10
+
+        # Get RGB values in 0-255 range
+        colors = cmap(indices, bytes=True)[:, :3].astype(numpy.uint8)
+        return [tuple(color) for color in colors]
 
     def _build_feature_matrix(
         self,
@@ -1246,10 +1238,8 @@ class SegmentationProcessor:
 
         return result
 
-    def to_pkl(self, filepath: Union[str, Path]) -> None:
+    def to_pkl(self, filepath: Path) -> None:
         """Serialize this processor to a compressed joblib PKL file."""
-        import joblib
-
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self, filepath)
