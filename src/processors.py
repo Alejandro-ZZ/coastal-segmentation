@@ -464,6 +464,7 @@ class PreprocessingBlock:
     def __init__(self):
         self.colorspace: str = "RGB"
         self.gaussian_sigma: float = 0.0
+        logger.debug(f"Created {self}")
 
     # ------------------------------------------------------------------
     # Builder methods (fluent interface)
@@ -475,6 +476,7 @@ class PreprocessingBlock:
         Use ``"RGB"`` to disable colorspace conversion (default).
         """
         self.colorspace = colorspace.upper()
+        logger.debug(f"Updated {self}")
         return self
 
     def set_gaussian_sigma(self, sigma: float) -> "PreprocessingBlock":
@@ -485,6 +487,7 @@ class PreprocessingBlock:
         if sigma < 0.0:
             raise ValueError("Gaussian sigma must be >= 0.0")
         self.gaussian_sigma = sigma
+        logger.debug(f"Updated {self}")
         return self
 
     # ------------------------------------------------------------------
@@ -509,6 +512,8 @@ class PreprocessingBlock:
         numpy.ndarray
             Preprocessed image of type `float64` and shape `(height, width, 3)`.
         """
+        logger.debug(f"[Start] {self.__class__.__name__}.transform()")
+
         img_float = skimage.util.img_as_float64(image=rgb_image, force_copy=True)
 
         if self.colorspace != "RGB":
@@ -525,6 +530,7 @@ class PreprocessingBlock:
                 channel_axis=-1
             )
 
+        logger.debug(f"[Finish] {self.__class__.__name__}.transform()")
         return img_float
 
     # ------------------------------------------------------------------
@@ -539,7 +545,7 @@ class PreprocessingBlock:
 
     def __repr__(self) -> str:
         return (
-            "PreprocessingBlock("
+            f"{self.__class__.__name__}("
                 f"colorspace='{self.colorspace}', "
                 f"gaussian_sigma={self.gaussian_sigma}"
             ")"
@@ -587,19 +593,23 @@ class PostprocessingBlock:
         self._bg_color: Tuple[int, int, int] = (0, 0, 0)
         self._majority_footprint: Optional[numpy.ndarray] = None
         self.label_to_color: Dict[int, List[int]] = {i: list(color) for i, color in enumerate(colors)}
+        logger.debug(f"Created {self}")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     @staticmethod
     def _check_color(color: Sequence[int]):
+        logger.debug("[Start] _check_color")
         if len(color) != 3:
             raise ValueError(f"Color must be a sequence of 3 integers (R, G, B). Got: {color}")
         for c in color:
             if not (0 <= c <= 255):
                 raise ValueError(f"Color values must be in the range [0, 255]. Got: {color}")
+        logger.debug("[Finish] _check_color")
 
     def _check_predicted_proba(self, predicted_proba: numpy.ndarray):
+        logger.debug("[Start] _check_predicted_proba")
         if not isinstance(predicted_proba, numpy.ndarray):
             raise ValueError(f"Predicted probabilities must be a numpy array. Got: {type(predicted_proba)}")
         if not issubclass(predicted_proba.dtype.type, numpy.floating):
@@ -623,6 +633,7 @@ class PostprocessingBlock:
             )
         if not numpy.allclose(predicted_proba.sum(axis=-1), 1.0):
             raise ValueError("Predicted probabilities must sum to 1 across the last dimension (classes).")
+        logger.debug("[Finish] _check_predicted_proba")
 
     # ------------------------------------------------------------------
     # Builder methods (fluent interface)
@@ -633,6 +644,7 @@ class PostprocessingBlock:
         if color in self.colors:
             raise ValueError(f"Input color {color} conflicts with class colors: {self.colors}")
         self._bg_color = tuple(color)
+        logger.debug(f"Updated {self}")
         return self
 
     def set_majority_filter(self, footprint: Optional[numpy.ndarray]) -> "PostprocessingBlock":
@@ -646,6 +658,7 @@ class PostprocessingBlock:
             if footprint.ndim != 2:
                 raise ValueError(f"Footprint must be a 2D array. Got: {footprint.shape}")
         self._majority_footprint = footprint
+        logger.debug(f"Updated {self}")
         return self
 
     # ------------------------------------------------------------------
@@ -756,6 +769,8 @@ class PostprocessingBlock:
             * ``"labels"``       – refined 2-D ``int32`` array ``(H, W)``.
             * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``.
         """
+        logger.debug(f"[Start] {self.__class__.__name__}.apply()")
+
         # Check predicted probabilities
         self._check_predicted_proba(predicted_proba)
 
@@ -775,6 +790,7 @@ class PostprocessingBlock:
 
         # TODO: Overlay image ("overlay")
 
+        logger.debug(f"[Finish] {self.__class__.__name__}.apply()")
         return {
             "labels": predicted_labels,
             "color_labels": color_labels
@@ -786,7 +802,6 @@ class PostprocessingBlock:
     def to_json(self) -> Dict[str, Any]:
         """Return the current configuration as a JSON-serializable dict."""
         return {
-            "classes": list(self.classes),
             "colors": [list(c) for c in self.colors],
             "ignore_index": self.ignore_index,
             "bg_color": list(self._bg_color),
@@ -804,8 +819,8 @@ class PostprocessingBlock:
             else None
         )
         return (
-            "PostprocessingBlock("
-                f"classes={self.classes}, "
+            f"{self.__class__.__name__}("
+                f"colors={self.colors}, "
                 f"ignore_index={self.ignore_index}, "
                 f"bg_color={self._bg_color}, "
                 f"majority_footprint_shape={fp_shape}"
