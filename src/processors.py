@@ -11,6 +11,7 @@ from typing import Union
 import numpy
 import pandas
 import skimage
+from skimage.util import img_as_uint
 from sklearn.base import ClassifierMixin, clone
 from sklearn.ensemble import RandomForestClassifier
 
@@ -437,9 +438,8 @@ class NeighborhoodExtractor:
 
 
 # ==============================================================================
-# PREPROCESSING BLOCK
+# PROCESSING BLOCKS
 # ==============================================================================
-
 class PreprocessingBlock:
     """
     Independent preprocessing block pipeline. See the method ``transform()`` for the
@@ -544,10 +544,6 @@ class PreprocessingBlock:
         )
 
 
-# ==============================================================================
-# POSTPROCESSING BLOCK
-# ==============================================================================
-
 class PostprocessingBlock:
     """
     Independent postprocessing block: majority-vote smoothing + color visualization.
@@ -584,71 +580,177 @@ class PostprocessingBlock:
     """
 
     def __init__(self, classes: List[str], colors: List[Sequence[int]]):
+        # Check for input sequences
         if len(classes) != len(colors):
             raise ValueError(
                 f"'classes' and 'colors' must have the same length. "
-                f"Got {len(classes)} classes and {len(colors)} colors."
+                f"Got: {len(classes)} classes and {len(colors)} colors."
             )
+        for color in colors:
+            self._check_color(color)
+            if tuple(color) == (0, 0, 0):
+                raise ValueError("Class colors cannot be black (0, 0, 0) as it is reserved for background.")
+
         self.classes: List[str] = list(classes)
-        self.colors: List[List[int]] = [list(c) for c in colors]
-        self.label_to_color: Dict[int, List[int]] = {
-            i: list(color) for i, color in enumerate(colors)
-        }
-        # Sentinel value assigned to pixels outside the ROI / not classified
+        self.colors: List[tuple] = [tuple(c) for c in colors]
+
         self.ignore_index: int = len(classes)
-        self.bg_color: Tuple[int, int, int] = (0, 0, 0)
-        self.majority_footprint: Optional[numpy.ndarray] = None
+        self._bg_color: Tuple[int, int, int] = (0, 0, 0)
+        self._majority_footprint: Optional[numpy.ndarray] = None
+        self.label_to_color: Dict[int, List[int]] = {i: list(color) for i, color in enumerate(colors)}
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _check_color(color: Sequence[int]):
+        if len(color) != 3:
+            raise ValueError(f"Color must be a sequence of 3 integers (R, G, B). Got: {color}")
+        for c in color:
+            if not (0 <= c <= 255):
+                raise ValueError(f"Color values must be in the range [0, 255]. Got: {color}")
+
+    @staticmethod
+    def _labels_to_rgb(
+            label_array: numpy.ndarray,
+            label_to_color: Dict[int, Sequence[int]]
+    ) -> numpy.ndarray:
+        """Convert an integer label array to a uint8 RGB image via a color-map dict."""
+        height, width = label_array.shape
+        color_image = numpy.zeros((height, width, 3), dtype=numpy.uint8)
+        for label, color in label_to_color.items():
+            color_image[label_array == label] = color
+        return color_image
+
+    def _check_predicted_proba(self, predicted_proba: numpy.ndarray):
+        if not isinstance(predicted_proba, numpy.ndarray):
+            raise ValueError(f"Predicted probabilities must be a numpy array. Got: {type(predicted_proba)}")
+        if not issubclass(predicted_proba.dtype.type, numpy.floating):
+            raise ValueError(
+                f"Predicted probabilities must be a floating-point array. Got: {predicted_proba.dtype}"
+            )
+        if predicted_proba.ndim != 3:
+            raise ValueError(
+                f"Predicted probabilities must be a 3D array of shape (H, W, num_classes). "
+                f"Got: {predicted_proba.shape}"
+            )
+        if predicted_proba.shape[2] != len(self.classes):
+            raise ValueError(
+                f"The last dimension of predicted probabilities must match the number of classes "
+                f"({len(self.classes)}). Got: {predicted_proba.shape[2]} classes."
+            )
+        if (predicted_proba < 0).any() or (predicted_proba > 1).any():
+            raise ValueError(
+                f"Predicted probabilities must be in the range [0, 1]. "
+                f"Got: [{predicted_proba.min()}, {predicted_proba.max()}]"
+            )
+        if not numpy.allclose(predicted_proba.sum(axis=-1), 1.0):
+            raise ValueError("Predicted probabilities must sum to 1 across the last dimension (classes).")
 
     # ------------------------------------------------------------------
     # Builder methods (fluent interface)
     # ------------------------------------------------------------------
-
-    def set_background(self, color: Tuple[int, int, int]) -> "PostprocessingBlock":
-        """
-        Set the RGB color used for background / masked-out pixels in the visualization.
-
-        Parameters
-        ----------
-        color : Tuple[int, int, int]
-            RGB values in the range ``[0, 255]``.
-
-        Returns
-        -------
-        PostprocessingBlock
-            ``self``, for method chaining.
-        """
-        self.bg_color = tuple(color)
+    def set_background_color(self, color: Tuple[int, int, int]) -> "PostprocessingBlock":
+        """Set the RGB color used for background / masked-out pixels in the visualization."""
+        self._check_color(color)
+        if color in self.colors:
+            raise ValueError(f"Input color {color} conflicts with class colors: {self.colors}")
+        self._bg_color = tuple(color)
         return self
 
-    def set_majority_filter(
-        self, footprint: Optional[numpy.ndarray]
-    ) -> "PostprocessingBlock":
+    def set_majority_filter(self, footprint: Optional[numpy.ndarray]) -> "PostprocessingBlock":
         """
         Set the structuring element for majority-vote label smoothing.
-
-        Parameters
-        ----------
-        footprint : numpy.ndarray or None
-            2-D boolean array defining the filter neighborhood.
-            Pass ``None`` to disable the filter (default).
-
-        Returns
-        -------
-        PostprocessingBlock
-            ``self``, for method chaining.
+        Use ``None`` to disable filtering (default).
         """
-        self.majority_footprint = footprint
+        if footprint is not None:
+            if not isinstance(footprint, numpy.ndarray):
+                raise ValueError(f"Footprint must be a numpy array. Got: {type(footprint)}")
+            if footprint.ndim != 2:
+                raise ValueError(f"Footprint must be a 2D array. Got: {footprint.shape}")
+        self._majority_footprint = footprint
         return self
 
     # ------------------------------------------------------------------
     # Core method
     # ------------------------------------------------------------------
+    def _apply_majority_filter(
+            self,
+            predicted_labels: numpy.ndarray,
+            roi_mask: Optional[numpy.ndarray] = None
+    ) -> numpy.ndarray:
+        """
+        Majority filtering of the predicted label mask, applied only inside the valid region
+        defined by `roi_mask`.
 
-    def apply(
-        self,
-        label_mask: numpy.ndarray,
-        roi_mask: Optional[numpy.ndarray] = None
-    ) -> dict:
+        Parameters
+        ----------
+        predicted_labels : numpy.ndarray
+            2-D integer array of shape (H, W) containing the predicted class labels for each pixel.
+
+        roi_mask : numpy.ndarray, optional
+            Boolean 2-D mask of shape (H, W) where `True` indicates pixels inside the valid region
+            for filtering. If `None` (default), the majority filter is applied to all pixels in
+            `predicted_labels`.
+
+        Returns
+        -------
+        numpy.ndarray
+            2-D integer array of shape (H, W) with the majority filter applied to the valid region.
+             Pixels outside the valid region (where `roi_mask` is `False`) are set to `ignore_index`.
+        """
+        logger.debug("[Start] _apply_majority_filter")
+
+        # No mask means all pixels were segmented
+        if roi_mask is None:
+            # Create a fake mask representing all pixels for consistency later
+            roi_mask = numpy.ones_like(predicted_labels, dtype=bool)
+
+        # Detect if any label is negative or with a value greater than uint16 max
+        # as the skimage majority filter requires uint8 or uint16 input.
+        if (predicted_labels < 0).any() or (predicted_labels > numpy.iinfo(numpy.uint16).max).any():
+            raise ValueError(
+                f"Label mask values outside the valid range for majority filter (uint16). "
+                f"Expected labels in [0, {numpy.iinfo(numpy.uint16).max}]. "
+                f"Got: [{predicted_labels.min()}, {predicted_labels.max()}]"
+            )
+
+        # Data type for majority filter input
+        if predicted_labels.max() <= numpy.iinfo(numpy.uint8).max:
+            filer_dtype = numpy.uint8
+        else:
+            filer_dtype = numpy.uint16
+
+        # Class count for debugging
+        uq_labels, counts = numpy.unique(predicted_labels, return_counts=True)
+
+        # Apply majority filter
+        predicted_labels = skimage.filters.rank.majority(
+            image=predicted_labels.astype(dtype=filer_dtype, copy=True),
+            footprint=self._majority_footprint,
+            mask=roi_mask
+        )
+
+        # Ensure pixels originally outside the valid mask are reset to "ignore_index",
+        # as filtering near boundaries might change their values.
+        predicted_labels[~roi_mask] = self.ignore_index
+
+        # Log only labels that changed
+        uq_labels_refined, counts_refined = numpy.unique(predicted_labels, return_counts=True)
+        for label in uq_labels_refined:
+            count_before = counts[uq_labels == label][0] if label in uq_labels else 0
+            count_after = counts_refined[uq_labels_refined == label][0]
+            diff_ratio = (count_after - count_before) / count_before if count_before > 0 else float('inf')
+            if count_before != count_after:
+                logger.debug(
+                    f"Label {label} refined: before={count_before}, "
+                    f"after={count_after} ({diff_ratio:.1%})"
+                )
+
+        logger.debug("[Finish] _apply_majority_filter")
+        return predicted_labels
+
+    def apply(self, predicted_proba: numpy.ndarray, roi_mask: Optional[numpy.ndarray] = None) -> dict:
         """
         Apply postprocessing to an assembled 2-D label mask.
 
@@ -660,15 +762,16 @@ class PostprocessingBlock:
 
         Parameters
         ----------
-        label_mask : numpy.ndarray
-            2-D ``int32`` array of shape ``(H, W)``. Pixels outside the ROI
-            must already carry ``self.ignore_index``.
+        predicted_proba : numpy.ndarray
+            3-D array of shape (height, width, num_classes) containing the predicted class
+            probabilities for each pixel. Values must be in the range [0, 1] and sum to 1
+            across the last dimension (classes).
 
         roi_mask : numpy.ndarray, optional
             Boolean 2-D mask ``(H, W)``. When provided:
 
             * The majority filter is applied only inside the valid region.
-            * ``ignore_index`` pixels receive ``bg_color`` in the visualization.
+            * ``ignore_index`` pixels receive ``_bg_color`` in the visualization.
 
         Returns
         -------
@@ -676,79 +779,62 @@ class PostprocessingBlock:
             * ``"labels"``       – refined 2-D ``int32`` array ``(H, W)``.
             * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``.
         """
-        import skimage.filters.rank
+        # Check predicted probabilities
+        self._check_predicted_proba(predicted_proba)
 
-        # Work on a copy to avoid mutating the caller's array
-        label_mask = label_mask.copy()
-
-        # ── Majority filter (optional) ───────────────────────────────────
-        if self.majority_footprint is not None:
-            valid_region = roi_mask if roi_mask is not None else (label_mask != self.ignore_index)
-            label_refined = skimage.filters.rank.majority(
-                label_mask.astype(numpy.uint8),
-                footprint=self.majority_footprint
-            )
-            label_mask[valid_region] = label_refined[valid_region]
-
-        # ── Color visualization ──────────────────────────────────────────
-        color_map: Dict[int, Any] = dict(self.label_to_color)
+        # Predicted integer labels
+        predicted_labels = numpy.argmax(predicted_proba, axis=-1).astype(numpy.uint32)
         if roi_mask is not None:
-            color_map[self.ignore_index] = list(self.bg_color)
+            predicted_labels[~roi_mask] = self.ignore_index
 
-        color_labels = self._labels_to_rgb(label_mask, color_map)
+        # Majority filter (optional)
+        if self._majority_footprint is not None:
+            predicted_labels = self._apply_majority_filter(predicted_labels, roi_mask)
 
+        # Color visualization
+        all_colors = self.colors + [self._bg_color]
+        color_palette = numpy.array(all_colors, dtype=numpy.uint8)
+        color_labels = color_palette[predicted_labels]
+
+        # TODO: Overlay image
+
+        # TODO: ['image', 'labels', 'color_labels', 'overlay', 'classes', 'original_image']
         return {
-            "labels": label_mask,
+            "labels": predicted_labels,
             "color_labels": color_labels
         }
 
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
-
-    def get_config(self) -> Dict[str, Any]:
+    def to_json(self) -> Dict[str, Any]:
         """Return the current configuration as a JSON-serializable dict."""
         return {
             "classes": list(self.classes),
             "colors": [list(c) for c in self.colors],
             "ignore_index": self.ignore_index,
-            "bg_color": list(self.bg_color),
+            "bg_color": list(self._bg_color),
             "majority_footprint": (
-                self.majority_footprint.tolist()
-                if self.majority_footprint is not None
+                self._majority_footprint.tolist()
+                if self._majority_footprint is not None
                 else None
             ),
         }
 
     def __repr__(self) -> str:
         fp_shape = (
-            str(self.majority_footprint.shape)
-            if self.majority_footprint is not None
+            str(self._majority_footprint.shape)
+            if self._majority_footprint is not None
             else None
         )
         return (
-            f"PostprocessingBlock("
-            f"classes={self.classes}, "
-            f"ignore_index={self.ignore_index}, "
-            f"bg_color={self.bg_color}, "
-            f"majority_footprint_shape={fp_shape})"
+            "PostprocessingBlock("
+                f"classes={self.classes}, "
+                f"ignore_index={self.ignore_index}, "
+                f"bg_color={self._bg_color}, "
+                f"majority_footprint_shape={fp_shape}"
+            ")"
         )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _labels_to_rgb(
-        label_array: numpy.ndarray,
-        label_to_color: Dict[int, Sequence[int]]
-    ) -> numpy.ndarray:
-        """Convert an integer label array to a uint8 RGB image via a color-map dict."""
-        height, width = label_array.shape
-        color_image = numpy.zeros((height, width, 3), dtype=numpy.uint8)
-        for label, color in label_to_color.items():
-            color_image[label_array == label] = color
-        return color_image
 
 
 # ==============================================================================
@@ -1150,7 +1236,7 @@ class SegmentationProcessor:
         )
 
         # ── 6. Postprocessing block ──────────────────────────────────────
-        result = self.postprocessing.apply(label_mask=label_mask, roi_mask=roi_mask)
+        result = self.postprocessing.apply(predicted_proba=label_mask, roi_mask=roi_mask)
 
         # ── 7. Optional persistence ──────────────────────────────────────
         if save_file is not None:
