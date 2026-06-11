@@ -1,0 +1,6 @@
+background
+wetsand
+drysand
+vegetation
+heavies
+lag

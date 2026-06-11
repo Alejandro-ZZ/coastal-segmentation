@@ -1,0 +1,15 @@
+{
+    "classes": [
+        "background",
+        "sand",
+        "vegetation",
+        "lag"
+    ],
+
+    "palette": [
+        [1, 1, 255],
+        [255, 255, 1],
+        [1, 255, 1],
+        [255, 1, 1]
+    ]
+}
