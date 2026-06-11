@@ -750,42 +750,63 @@ class PostprocessingBlock:
         logger.debug("[Finish] _apply_majority_filter")
         return predicted_labels
 
-    def apply(self, predicted_proba: numpy.ndarray, roi_mask: Optional[numpy.ndarray] = None) -> dict:
+    def apply(
+            self,
+            image: numpy.ndarray,
+            predicted_proba: numpy.ndarray,
+            roi_mask: Optional[numpy.ndarray] = None
+    ) -> Dict[str, numpy.ndarray]:
         """
-        Apply postprocessing to an assembled 2-D label mask.
-
-        Steps
-        -----
-        1. **Majority filter** (optional): replace each pixel with the most
-           common label in its neighbourhood, only inside the valid region.
-        2. **Color visualization**: map integer labels to RGB colors.
+        Apply postprocessing to the predicted class probabilities.
 
         Parameters
         ----------
+        image : numpy.ndarray
+            Original RGB image of shape `(height, width, 3)` used for creating overlay image.
+
         predicted_proba : numpy.ndarray
-            3-D array of shape (height, width, num_classes) containing the predicted class
+            3-D array of shape `(height, width, n_classes)` containing the predicted class
             probabilities for each pixel. Values must be in the range [0, 1] and sum to 1
             across the last dimension (classes).
 
         roi_mask : numpy.ndarray, optional
-            Boolean 2-D mask ``(H, W)``. When provided:
+            Boolean 2-D mask `(height, width)`. When provided:
 
             * The majority filter is applied only inside the valid region.
             * ``ignore_index`` pixels receive ``_bg_color`` in the visualization.
 
         Returns
         -------
-        dict
-            * ``"labels"``       – refined 2-D ``int32`` array ``(H, W)``.
-            * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``.
+        Dict[str, numpy.ndarray]
+            Postprocessing results of numpy arrays containing the following data:
+
+            *   ``labels``: 2-D integer array of shape `(height, width)` with the predicted
+                class labels for each pixel. Pixels with the value of ``ignore_index`` indicate
+                masked-out areas (if `roi_mask` is provided).
+
+            *   ``color_labels``: 3-D uint8 RGB array of shape `(height, width, 3)` where each pixel's
+                color corresponds to its predicted class label. Pixels with the value of ``ignore_index``
+                receive the background color defined by ``_bg_color``.
+
+            *   ``overlay``: 3-D uint8 RGB array of shape `(height, width, 3)` representing an overlay
+                visualization of the predicted class labels on top of the original image.
         """
         logger.debug(f"[Start] {self.__class__.__name__}.apply()")
 
         # Check predicted probabilities
         self._check_predicted_proba(predicted_proba)
 
+        # Labels data type
+        n_labels = predicted_proba.shape[2] + 1  # +1 for ignore_index
+        if n_labels <= numpy.iinfo(numpy.uint8).max:
+            labels_dtype = numpy.uint8
+        elif n_labels <= numpy.iinfo(numpy.uint16).max:
+            labels_dtype = numpy.uint16
+        else:
+            labels_dtype = numpy.uint32
+
         # Predicted integer labels
-        predicted_labels = numpy.argmax(predicted_proba, axis=-1).astype(numpy.uint32)
+        predicted_labels = numpy.argmax(predicted_proba, axis=-1).astype(labels_dtype)
         if roi_mask is not None:
             predicted_labels[~roi_mask] = self.ignore_index
 
@@ -798,12 +819,18 @@ class PostprocessingBlock:
         color_palette = numpy.array(all_colors, dtype=numpy.uint8)
         color_labels = color_palette[predicted_labels]
 
-        # TODO: Overlay image ("overlay")
+        # Overlay image
+        colors_alpha = 0.5
+        img_float = skimage.util.img_as_float(image, force_copy=True)
+        color_labels_float = skimage.util.img_as_float(color_labels, force_copy=True)
+        img_overlay = (img_float * (1.0 - colors_alpha)) + (color_labels_float * colors_alpha)
+        img_overlay = skimage.util.img_as_ubyte(img_overlay)
 
         logger.debug(f"[Finish] {self.__class__.__name__}.apply()")
         return {
             "labels": predicted_labels,
-            "color_labels": color_labels
+            "color_labels": color_labels,
+            "overlay": img_overlay
         }
 
     # ------------------------------------------------------------------
@@ -965,6 +992,7 @@ class SegmentationProcessor:
         logger.debug("[Finish] _create_color_palette")
         return [tuple(color) for color in colors]
 
+    # TODO: Check this method
     def _build_feature_matrix(
         self,
         images_path: Path,
@@ -999,6 +1027,7 @@ class SegmentationProcessor:
 
         return numpy.vstack(all_features), numpy.concatenate(all_labels)
 
+    # TODO: Check this method
     def _assemble_label_mask(
         self,
         predicted_labels: numpy.ndarray,
@@ -1154,6 +1183,7 @@ class SegmentationProcessor:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    # TODO: Check this method
     def evaluate_classifier(
         self,
         images_path: Path,
@@ -1239,28 +1269,30 @@ class SegmentationProcessor:
         """
         Segment an image using the trained classifier.
 
-        Pipeline
-        --------
-        1. ``preprocessing.transform(rgb_image)``     – colorspace + blur
-        2. Feature extraction via ``feature_extractor``
-        3. Classification + optional refinement (``_predict``)
-        4. Assemble full-image label mask (``_assemble_label_mask``)
-        5. ``postprocessing.apply(label_mask, roi_mask)`` – filter + colorize
-
         Parameters
         ----------
         rgb_image : numpy.ndarray
-            Input RGB image ``(H, W, 3)``, ``uint8`` or ``float``.
+            Input RGB image of shape `(height, width, 3)` and `uint8` data type.
 
         roi_mask : numpy.ndarray, optional
-            Boolean mask ``(H, W)``. Only ``True`` pixels are classified.
+            Boolean mask of shape `(height, width)`. Only `True` pixels are classified.
+            For pixels outside the valid region (`False` pixels), output results behave
+            as follows:
+
+            * labels: receive the postprocessing ignore index value.
+            * color_labels: receive the postprocessing background color.
+            * probabilities: receive a uniform distribution over classes (1 / n_classes).
 
         class_priors : numpy.ndarray, optional
-            Spatial prior probabilities ``(H, W, n_classes)``.
-            Required when ``refine="bayes"``.
+            Spatial prior probabilities of shape `(height, width, n_classes)`.
+            Required if `refine="bayes"`.
 
         refine : str, optional
-            ``None`` (raw RF), ``"bayes"``, or ``"crf"``.
+            Predicted probabilities refinement method to apply. If `None` (default), no refinement
+            is applied. Supported methods:
+
+            * ``"bayes"``: Bayesian refinement using the provided `class_priors`.
+            * ``"crf"``: Dense CRF refinement using the input RGB image for pairwise potentials.
 
         save_file : Path, optional
             If provided, saves the integer label array as a compressed NPZ
@@ -1269,8 +1301,15 @@ class SegmentationProcessor:
         Returns
         -------
         dict
-            * ``"labels"``       – 2-D ``int32`` array ``(H, W)``
-            * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``
+            Predicted results data. See ``roi_mask`` parameter for behavior of each output
+            in masked-out areas.
+
+            *   ``"classes"``: List of class names corresponding to the predicted labels.
+            *   ``"image"``: The original input RGB image.
+            *   ``"class_proba"``: predicted class probabilities. 3D array as `(height, width, n_classes)`
+            *   ``"labels"``: predicted class labels. 2D integer array as `(height, width)`.
+            *   ``"color_labels"``: color-coded image labels. 3D uint8 RGB array as `(height, width, 3)`.
+            *   ``"overlay"``: overlay visualization. 3D uint8 RGB array of shape `(height, width, 3)`.
         """
         logger.debug("[Start] predict_image")
 
@@ -1281,6 +1320,8 @@ class SegmentationProcessor:
         # Preprocessing block
         image = self.preprocessing.transform(rgb_image)
 
+        # Model Inference
+        # ------------------------------------------------------------------------
         # Feature extraction
         # Shape (n_samples, n_features)
         X = self.feature_extractor.transform(image=image, mask=roi_mask)
@@ -1300,7 +1341,7 @@ class SegmentationProcessor:
             dummy_proba[roi_mask] = predicted_proba
             predicted_proba = dummy_proba
 
-        # Refine predictions (optional)
+        # Refined probabilities (optional)
         if refine is not None:
             if refine not in self._SUPPORTED_REFINE_METHODS:
                 raise ValueError(
@@ -1310,20 +1351,32 @@ class SegmentationProcessor:
             elif refine == "bayes":
                 predicted_proba = self._refine_bayes(predicted_proba=predicted_proba, prior_proba=class_priors)
             elif refine == "crf":
-                # TODO
-                pass
+                predicted_proba = self._refine_crf(predicted_proba=predicted_proba, rgb_image=rgb_image)
+        # ------------------------------------------------------------------------
+
+        # Output results
+        final_results = {
+            "classes": self.class_names,
+            "image": rgb_image,
+            "class_proba": predicted_proba,
+        }
 
         # Postprocessing block
-        result = self.postprocessing.apply(predicted_proba=predicted_proba, roi_mask=roi_mask)
+        postprocessed_results = self.postprocessing.apply(
+            image=rgb_image,
+            predicted_proba=predicted_proba,
+            roi_mask=roi_mask
+        )
+        final_results.update(postprocessed_results)
 
-        # ── 7. Optional persistence ──────────────────────────────────────
+        # Persistence as NPZ (optional)
         if save_file is not None:
-            save_file = Path(save_file)
             save_file.parent.mkdir(parents=True, exist_ok=True)
-            numpy.savez_compressed(save_file, labels=result["labels"])
+            numpy.savez_compressed(save_file.with_suffix(".npz"), **final_results)
+            logger.info(f"Predicted results saved: '{save_file}'")
 
         logger.debug("[Finish] predict_image")
-        return result
+        return final_results
 
     def to_pkl(self, filepath: Path):
         """Serialize this processor to a compressed joblib PKL file."""
