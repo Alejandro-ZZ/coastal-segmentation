@@ -124,6 +124,7 @@ def create_segmentation_processor(
     print("Creating and training the SegmentationProcessor with the following parameters:")
     print(f"  n_neighbors: {n_neighbors}")
     print(f"  colorspace: {colorspace}")
+    print(f"  output_file: {output_file}")
 
     processor = SegmentationProcessor(
         n_neighbors=n_neighbors,
