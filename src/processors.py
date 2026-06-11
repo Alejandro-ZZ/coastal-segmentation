@@ -451,7 +451,6 @@ class NeighborhoodExtractor:
 
         return features
 
-
 # ==============================================================================
 # PROCESSING BLOCKS
 # ==============================================================================
@@ -563,7 +562,6 @@ class PreprocessingBlock:
                 f"gaussian_sigma={self.gaussian_sigma}"
             ")"
         )
-
 
 class PostprocessingBlock:
     """
@@ -867,11 +865,9 @@ class PostprocessingBlock:
             ")"
         )
 
-
 # ==============================================================================
 # SEGMENTATION PROCESSOR
 # ==============================================================================
-
 class SegmentationProcessor:
     """
     Pixel-wise image segmentation processor.
