@@ -109,8 +109,8 @@ class NeighborhoodExtractor:
             "center_loc": self.center_loc
         }
 
-    def validate_input(
-            self,
+    @staticmethod
+    def _validate_input(
             image: numpy.ndarray,
             yx_coordinates: Optional[numpy.ndarray] = None,
             mask: Optional[numpy.ndarray] = None
@@ -398,7 +398,7 @@ class NeighborhoodExtractor:
         # ---------------------
         if isinstance(yx_coordinates, list):
             yx_coordinates = numpy.asarray(yx_coordinates)
-        self.validate_input(image=image, yx_coordinates=yx_coordinates, mask=mask)
+        self._validate_input(image=image, yx_coordinates=yx_coordinates, mask=mask)
 
         logger.debug(f"Processing feature space with {self.n_neighbors} neighbors")
         logger.debug(f"Input image shape: {image.shape}")
@@ -1011,7 +1011,6 @@ class SegmentationProcessor:
         logger.debug("[Finish] _create_color_palette")
         return [tuple(color) for color in colors]
 
-    # TODO: Check this method
     def _build_feature_matrix(
         self,
         images_path: Path,
@@ -1021,26 +1020,21 @@ class SegmentationProcessor:
         Load annotated images, preprocess them via the preprocessing block,
         extract neighborhood features, and return ``(X, y)``.
         """
-        import skimage.io
-
         all_features: List[numpy.ndarray] = []
         all_labels: List[numpy.ndarray] = []
 
-        for image_file_name, group in annotations_data.groupby("ImageFile"):
-            rgb_image = skimage.io.imread(images_path / image_file_name)
-
-            # Delegate image preprocessing to the block
+        for img_filename, img_group in annotations_data.groupby("ImageFile"):
+            # Load and preprocess image
+            rgb_image = skimage.io.imread(images_path / img_filename)
             image = self.preprocessing.transform(rgb_image)
 
-            cx = group["Cx"].values.astype(int)
-            cy = group["Cy"].values.astype(int)
-            yx_coords = numpy.stack((cy, cx), axis=1)
+            # Extract features
+            yx_coordinate = img_group.loc[:, ["Cy", "Cx"]].to_numpy(dtype=int)
+            features = self.feature_extractor.transform(image=image, yx_coordinates=yx_coordinate)
 
-            features = self.feature_extractor.transform(image=image, yx_coordinates=yx_coords)
-            labels = numpy.array(
-                [self.class_names.index(cls) for cls in group["Class"]],
-                dtype=int
-            )
+            # Get target labels
+            labels = img_group["Class"].map(lambda cls: self.class_names.index(cls)).to_numpy(dtype=int)
+
             all_features.append(features)
             all_labels.append(labels)
 
