@@ -12,8 +12,11 @@ import joblib
 import matplotlib.pyplot as plt
 import numpy
 import pandas
+import pydensecrf.densecrf as dcrf
 import skimage
 import sklearn
+
+from pydensecrf.utils import unary_from_softmax
 from sklearn.base import ClassifierMixin, clone
 
 
@@ -899,6 +902,9 @@ class SegmentationProcessor:
         Segmentation RGB colors (0–255 range), one per class.
         Must have the same length as ``classes``.
     """
+
+    _SUPPORTED_REFINE_METHODS = {"bayes", "crf"}
+
     def __init__(
             self,
             n_neighbors: int,
@@ -947,12 +953,16 @@ class SegmentationProcessor:
     @staticmethod
     def _create_color_palette(num_classes: int) -> List[Sequence[int]]:
         """Generate a default color palette for the given number of classes."""
+        logger.debug("[Start] _create_color_palette")
+
         # Colormap and indices for color generation
         cmap = plt.get_cmap(name="tab10")
         indices = numpy.arange(num_classes) % 10
 
         # Get RGB values in 0-255 range
         colors = cmap(indices, bytes=True)[:, :3].astype(numpy.uint8)
+
+        logger.debug("[Finish] _create_color_palette")
         return [tuple(color) for color in colors]
 
     def _build_feature_matrix(
@@ -1015,6 +1025,8 @@ class SegmentationProcessor:
     @staticmethod
     def _refine_bayes(predicted_proba: numpy.ndarray, prior_proba: numpy.ndarray) -> numpy.ndarray:
         """Bayesian refinement of predicted probabilities"""
+        logger.debug("[Start] _refine_bayes")
+
         # Validate probabilities
         if prior_proba is None:
             raise ValueError("Prior probabilities must be provided for Bayesian refinement.")
@@ -1042,45 +1054,102 @@ class SegmentationProcessor:
             1.0 / n_classes                 # If norm_factor is zero, assign uniform probabilities
         )
 
+        logger.debug("[Finish] _refine_bayes")
         return refined_proba
 
+    @staticmethod
     def _refine_crf(
-        self,
+        predicted_proba: numpy.ndarray,
         rgb_image: numpy.ndarray,
-        yx_coords: numpy.ndarray,
-        X: numpy.ndarray,
-        height: int,
-        width: int
     ) -> numpy.ndarray:
-        """Dense CRF inference over the full image grid. Requires ``pydensecrf``."""
-        try:
-            import pydensecrf.densecrf as dcrf
-            from pydensecrf.utils import unary_from_softmax
-        except ImportError:
-            raise ImportError(
-                "CRF refinement requires 'pydensecrf'. "
-                "Install it with: pip install pydensecrf"
-            )
+        """
+        Dense CRF inference over the full image grid.
 
-        n_classes = len(self.class_names)
-        proba = self.classifier.predict_proba(X)
-        prob_volume = numpy.zeros((height, width, n_classes), dtype=numpy.float32)
-        prob_volume[yx_coords[:, 0], yx_coords[:, 1]] = proba
-        prob_chw = numpy.clip(prob_volume.transpose(2, 0, 1), 1e-6, 1.0)
+        Notes
+        -----
+        *   ``sxy`` (distance in pixels): control the spatial smoothness (the smaller, the more local
+            the smoothing). This kernel solely looks at the spatial distance between pixels to remove
+            small, isolated incorrectly-labeled regions.
 
-        d = dcrf.DenseCRF2D(width, height, n_classes)
-        d.setUnaryEnergy(unary_from_softmax(prob_chw))
-        d.addPairwiseGaussian(sxy=3, compat=3)
+        *   ``srgb`` (distance in RGB color intensity space): control the color similarity (the smaller,
+            the more likely to smooth across similar colors). This kernel connects pixels that are both
+            spatially nearby and have similar colors, based on the observation that nearby pixels of
+            similar color usually belong to the same object class.
 
-        img_u8 = (
-            rgb_image if rgb_image.dtype == numpy.uint8
-            else (rgb_image * 255).astype(numpy.uint8)
-        )
-        d.addPairwiseBilateral(sxy=40, srgb=10, rgbim=img_u8, compat=10)
+         *  ``compat``: control the strength of each pairwise term. Higher values lead to stronger
+            smoothing effects. When the model connects two pixels using the kernels (``PairwiseGaussian``
+            ``PairwiseBilateral``), this parameter introduces a penalty if those two pixels are assigned
+            different labels. Can take three different types:
 
-        Q = numpy.array(d.inference(5)).reshape(n_classes, height, width)
-        full_map = numpy.argmax(Q, axis=0)
-        return full_map[yx_coords[:, 0], yx_coords[:, 1]]
+                *   A single number (``PottsCompatibility``): This is a simple penalty that penalizes any pair of
+                    nearby/similar pixels that are given different labels equally.
+
+                *   A 1D array (``DiagonalCompatibility``): An array of length `n_classes` with a float32
+                    datatype, which allows you to apply different penalties depending on the specific label.
+
+                *   A 2D array (``MatrixCompatibility``): An `n_classes x n_classes` matrix with a float32
+                    datatype. This allows you to define a general symmetric compatibility matrix that takes
+                    interactions between specific labels into account. For example, you can configure it so
+                    that mistaking a "bird" pixel for "sky" is penalized less harshly than mistaking a
+                    "cat" pixel for "sky". The matrix should be symmetric (μ(a,b)=μ(b,a)). The penalty for
+                    Class A touching Class B should be the same as Class B touching Class A.
+
+            Example::
+
+                    [
+                        [  0, 10, 5 ],
+                        [ 10,  0, 2 ],
+                        [  5,  2, 0 ]
+                    ]
+
+            Classes 0 and 1 are penalized with a strength of 10 when they touch, while classes 0 and 2
+            are penalized with a strength of 5, and classes 1 and 2 are penalized with a strength of 2.
+            The diagonal elements are zero because there is no penalty for pixels of the same class
+            touching each other.
+
+
+         *  ``kernel``: using a diagonal kernel means that the pairwise potentials only penalize
+            label differences, without considering specific label interactions. This is a common choice
+            for multi-class segmentation when no prior knowledge about class relationships is available.
+
+         *  ``normalization``: symmetric normalization ensures that the influence of neighboring pixels
+            is balanced and does not depend on their degree of connectivity, which can help prevent
+            over-smoothing in densely connected regions.
+        """
+        logger.debug("[Start] _refine_crf")
+
+        height, width = rgb_image.shape[:2]
+        n_classes = predicted_proba.shape[-1]
+
+        # Convert probabilities to the shape (num_classes, height, width)
+        softmax_arr = predicted_proba.transpose(2, 0, 1).astype(numpy.float32)
+
+        # Make arrays as contiguous in memory for pydensecrf
+        softmax_arr = numpy.ascontiguousarray(softmax_arr)
+        rgb_image = numpy.ascontiguousarray(rgb_image)
+
+        # Initialize DenseCRF model and set unary potentials
+        dcrf_model = dcrf.DenseCRF2D(width, height, n_classes)
+        dcrf_model.setUnaryEnergy(unary_from_softmax(softmax_arr))
+
+        # Color-independent term, features are the locations only
+        # Defaults to `kernel=dcrf.DIAG_KERNEL` and `normalization=dcrf.NORMALIZE_SYMMETRIC`
+        dcrf_model.addPairwiseGaussian(sxy=3, compat=3)
+
+        # Color-dependent term, i.e. features are (x, y, r, g, b)
+        # Defaults to `kernel=dcrf.DIAG_KERNEL` and `normalization=dcrf.NORMALIZE_SYMMETRIC`
+        dcrf_model.addPairwiseBilateral(sxy=80, srgb=13, rgbim=rgb_image, compat=10)
+
+        # Apply CRF inference
+        # Shape (n_classes, width*height)
+        refined_proba = numpy.asarray(dcrf_model.inference(15))
+
+        # Reconstruct back to (height, width, n_classes)
+        refined_proba = refined_proba.reshape((n_classes, height, width))
+        refined_proba = refined_proba.transpose(1, 2, 0)
+
+        logger.debug("[Finish] _refine_crf")
+        return refined_proba
 
     # ------------------------------------------------------------------
     # Public API
@@ -1203,6 +1272,9 @@ class SegmentationProcessor:
             * ``"labels"``       – 2-D ``int32`` array ``(H, W)``
             * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``
         """
+        logger.debug("[Start] predict_image")
+
+        rgb_image = skimage.util.img_as_ubyte(rgb_image)
         height, width = rgb_image.shape[:2]
         n_classes = len(self.class_names)
 
@@ -1210,25 +1282,35 @@ class SegmentationProcessor:
         image = self.preprocessing.transform(rgb_image)
 
         # Feature extraction
+        # Shape (n_samples, n_features)
         X = self.feature_extractor.transform(image=image, mask=roi_mask)
 
-        # Raw prediction probabilities
+        # Raw predicted probabilities
         # Shape (n_samples, n_classes)
         predicted_proba = self.classifier.predict_proba(X)
 
-        # Full prediction probabilities with uniform probability for unclassified pixels
+        # Full predicted probabilities with uniform probability for unclassified pixels
         # Shape (height, width, n_classes)
         if roi_mask is not None:
-            dummy_proba = numpy.zeros(shape=(height, width, n_classes), dtype=numpy.float32)
+            dummy_proba = numpy.full(
+                shape=(height, width, n_classes),
+                fill_value=1.0 / n_classes,
+                dtype=numpy.float32
+            )
             dummy_proba[roi_mask] = predicted_proba
-            dummy_proba[~roi_mask] = 1.0 / n_classes
             predicted_proba = dummy_proba
 
         # Refine predictions (optional)
         if refine is not None:
-            if refine == "bayes":
-                pass
+            if refine not in self._SUPPORTED_REFINE_METHODS:
+                raise ValueError(
+                    f"Unsupported refinement method: '{refine}'. "
+                    f"Supported methods: {self._SUPPORTED_REFINE_METHODS}"
+                )
+            elif refine == "bayes":
+                predicted_proba = self._refine_bayes(predicted_proba=predicted_proba, prior_proba=class_priors)
             elif refine == "crf":
+                # TODO
                 pass
 
         # Postprocessing block
@@ -1240,6 +1322,7 @@ class SegmentationProcessor:
             save_file.parent.mkdir(parents=True, exist_ok=True)
             numpy.savez_compressed(save_file, labels=result["labels"])
 
+        logger.debug("[Finish] predict_image")
         return result
 
     def to_pkl(self, filepath: Path):
