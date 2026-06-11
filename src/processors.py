@@ -13,9 +13,8 @@ import matplotlib.pyplot as plt
 import numpy
 import pandas
 import skimage
-from skimage.util import img_as_uint
+import sklearn
 from sklearn.base import ClassifierMixin, clone
-from sklearn.ensemble import RandomForestClassifier
 
 
 logger = logging.getLogger("Processors")
@@ -95,6 +94,14 @@ class NeighborhoodExtractor:
 
     def __str__(self):
         return self.__repr__()
+
+    def to_json(self):
+        """Return the current configuration as a JSON-serializable dict."""
+        return {
+            "n_neighbors": self.n_neighbors,
+            "include_center": self.include_center,
+            "center_loc": self.center_loc
+        }
 
     def validate_input(
             self,
@@ -363,7 +370,8 @@ class NeighborhoodExtractor:
 
         mask : numpy.ndarray, optional
             2D array of shape (image_height, image_width) defining pixels of the image to extract features.
-            If not provided and `yx_coordinates` is None, all image pixels are computed.
+            Ignored if `yx_coordinates` is provided. If not provided and `yx_coordinates` is None, all image
+            pixels are computed.
 
         Returns
         -------
@@ -371,13 +379,13 @@ class NeighborhoodExtractor:
             A 2D array of shape `(n_samples, n_features)`
 
             *   ``n_samples`` refers to the number of pixel coordinates in the input ``yx_coordinates`` or
-                defined by the ``mask``. If both are None, it corresponds to the total number of pixels in
-                the input image, i.e., `height * width`.
+                defined by the ``mask`` (> 0). If both are None, it corresponds to the total number of pixels
+                in the input image, i.e., `height * width`.
 
             *   ``n_features`` corresponds to the number of neighborhood features extracted for each pixel
-                coordinate. It is defined as: `image_channels * (n_neighbors + 1)`. Values are ordered
-                sequentially with the center pixel being in the middle of the array followed by its neighbors
-                in incremental order: 1, 2, 3, ... , `n_neighbors`.
+                coordinate. It is defined as: `image_channels * (n_neighbors + 1)` if `include_center` is True,
+                and `image_channels * n_neighbors` if `include_center` is False. See `center_loc` parameter for
+                the position of the center pixel values in the output feature vector.
         """
         # ---------------------
         # INPUT VALIDATION
@@ -436,7 +444,6 @@ class NeighborhoodExtractor:
                     # features = numpy.append(center_pixel_values, neighbor_pixel_values, axis=1)
 
         return features
-
 
 
 # ==============================================================================
@@ -1005,45 +1012,37 @@ class SegmentationProcessor:
         label_mask[yx_coords[:, 0], yx_coords[:, 1]] = predicted_labels
         return label_mask
 
-    def _predict(
-        self,
-        X: numpy.ndarray,
-        rgb_image: numpy.ndarray,
-        yx_coords: numpy.ndarray,
-        class_priors: Optional[numpy.ndarray],
-        refine: Optional[str],
-        height: int,
-        width: int
-    ) -> numpy.ndarray:
-        """
-        Classify pixels in ``X``, applying the chosen refinement strategy.
-
-        Refinement strategies
-        ---------------------
-        * ``None``      – raw RF ``predict()``.
-        * ``"bayes"``   – RF posteriors multiplied by spatial ``class_priors``, re-normalised.
-        * ``"crf"``     – dense CRF inference (requires ``pydensecrf``).
-        """
-        if refine == "bayes" and class_priors is not None:
-            posteriors = self.classifier.predict_proba(X)
-            pixel_priors = class_priors[yx_coords[:, 0], yx_coords[:, 1], :]
-            posteriors = posteriors * pixel_priors
-            row_sums = posteriors.sum(axis=1, keepdims=True)
-            row_sums[row_sums == 0.0] = 1.0   # guard against all-zero prior
-            posteriors /= row_sums
-            return numpy.argmax(posteriors, axis=1)
-
-        elif refine == "crf":
-            return self._refine_crf(
-                rgb_image=rgb_image,
-                yx_coords=yx_coords,
-                X=X,
-                height=height,
-                width=width
+    @staticmethod
+    def _refine_bayes(predicted_proba: numpy.ndarray, prior_proba: numpy.ndarray) -> numpy.ndarray:
+        """Bayesian refinement of predicted probabilities"""
+        # Validate probabilities
+        if prior_proba is None:
+            raise ValueError("Prior probabilities must be provided for Bayesian refinement.")
+        if prior_proba.shape != predicted_proba.shape:
+            raise ValueError(
+                f"Prior probabilities shape {prior_proba.shape} does not match "
+                f"predicted probabilities shape {predicted_proba.shape}."
             )
+        if not numpy.all((prior_proba >= 0) & (prior_proba <= 1)):
+            raise ValueError("Prior probabilities must be in the range [0, 1].")
+        if not numpy.allclose(prior_proba.sum(axis=-1), 1.0):
+            raise ValueError("Prior probabilities must sum to 1 across the last dimension (classes).")
 
-        else:
-            return self.classifier.predict(X)
+        # Apply Bayes' theorem: P(class|data) ∝ P(data|class) * P(class)
+        refined_proba = predicted_proba * prior_proba
+
+        # Normalize the refined probabilities to ensure they sum to 1 across classes
+        norm_factor = refined_proba.sum(axis=-1, keepdims=True)
+
+        # Set uniform distribution if the norm factor is zero to avoid division by zero
+        n_classes = predicted_proba.shape[-1]
+        refined_proba = numpy.where(
+            norm_factor > 0,
+            refined_proba / norm_factor,    # Normalize to sum to 1
+            1.0 / n_classes                 # If norm_factor is zero, assign uniform probabilities
+        )
+
+        return refined_proba
 
     def _refine_crf(
         self,
@@ -1086,7 +1085,6 @@ class SegmentationProcessor:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     def evaluate_classifier(
         self,
         images_path: Path,
@@ -1206,44 +1204,35 @@ class SegmentationProcessor:
             * ``"color_labels"`` – 3-D ``uint8`` RGB array ``(H, W, 3)``
         """
         height, width = rgb_image.shape[:2]
+        n_classes = len(self.class_names)
 
-        # ── 1. Preprocessing block ───────────────────────────────────────
+        # Preprocessing block
         image = self.preprocessing.transform(rgb_image)
 
-        # ── 2. Determine pixels to classify ─────────────────────────────
+        # Feature extraction
+        X = self.feature_extractor.transform(image=image, mask=roi_mask)
+
+        # Raw prediction probabilities
+        # Shape (n_samples, n_classes)
+        predicted_proba = self.classifier.predict_proba(X)
+
+        # Full prediction probabilities with uniform probability for unclassified pixels
+        # Shape (height, width, n_classes)
         if roi_mask is not None:
-            yx_coords = numpy.argwhere(roi_mask)
-        else:
-            rows, cols = numpy.meshgrid(
-                numpy.arange(height), numpy.arange(width), indexing="ij"
-            )
-            yx_coords = numpy.stack((rows.ravel(), cols.ravel()), axis=1)
+            dummy_proba = numpy.zeros(shape=(height, width, n_classes), dtype=numpy.float32)
+            dummy_proba[roi_mask] = predicted_proba
+            dummy_proba[~roi_mask] = 1.0 / n_classes
+            predicted_proba = dummy_proba
 
-        # ── 3. Feature extraction ────────────────────────────────────────
-        X = self.feature_extractor.transform(image=image, yx_coordinates=yx_coords)
+        # Refine predictions (optional)
+        if refine is not None:
+            if refine == "bayes":
+                pass
+            elif refine == "crf":
+                pass
 
-        # ── 4. Prediction + refinement ───────────────────────────────────
-        predicted_labels = self._predict(
-            X=X,
-            rgb_image=rgb_image,
-            yx_coords=yx_coords,
-            class_priors=class_priors,
-            refine=refine,
-            height=height,
-            width=width
-        )
-
-        # ── 5. Assemble full-image label mask ────────────────────────────
-        label_mask = self._assemble_label_mask(
-            predicted_labels=predicted_labels,
-            yx_coords=yx_coords,
-            height=height,
-            width=width,
-            roi_mask=roi_mask
-        )
-
-        # ── 6. Postprocessing block ──────────────────────────────────────
-        result = self.postprocessing.apply(predicted_proba=label_mask, roi_mask=roi_mask)
+        # Postprocessing block
+        result = self.postprocessing.apply(predicted_proba=predicted_proba, roi_mask=roi_mask)
 
         # ── 7. Optional persistence ──────────────────────────────────────
         if save_file is not None:
@@ -1253,52 +1242,35 @@ class SegmentationProcessor:
 
         return result
 
-    def to_pkl(self, filepath: Path) -> None:
+    def to_pkl(self, filepath: Path):
         """Serialize this processor to a compressed joblib PKL file."""
-        filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self, filepath)
-        logger.info(f"SegmentationProcessor saved: {filepath}")
+        logger.info(f"Processor saved: '{filepath}'")
 
     def get_metadata(self) -> dict:
-        """
-        Return a JSON-serializable metadata dictionary.
-
-        Returns
-        -------
-        dict
-            * ``"preprocessing"``      – config from :class:`PreprocessingBlock`.
-            * ``"postprocessing"``     – config from :class:`PostprocessingBlock`.
-            * ``"feature_extraction"`` – ``{"n_neighbors"}``.
-            * ``"classifier"``         – type, scikit-learn version, hyperparameters.
-            * ``"training"``           – present only after ``evaluate_classifier(do_train=True)``.
-        """
-        import sklearn
-
-        metadata: Dict[str, Any] = {
-            "preprocessing": self.preprocessing.get_config(),
-            "postprocessing": self.postprocessing.get_config(),
-            "feature_extraction": {
-                "n_neighbors": self.n_neighbors,
-            },
+        """JSON-serializable metadata dictionary."""
+        processor_blocks = {
+            "preprocessing": self.preprocessing.to_json(),
+            "feature_extraction": self.feature_extractor.to_json(),
             "classifier": {
                 "type": type(self.classifier).__name__,
-                "framework": {
-                    "name": "scikit-learn",
-                    "version": sklearn.__version__,
-                },
+                "framework": {"name": "scikit-learn", "version": sklearn.__version__},
                 "hyperparameters": self.classifier.get_params(),
             },
+            "postprocessing": self.postprocessing.to_json(),
         }
 
-        if self.training_metadata is not None:
-            metadata["training"] = self.training_metadata
-
-        return metadata
+        return {
+            "class_names": self.class_names,
+            "n_neighbors": self.n_neighbors,
+            "blocks": processor_blocks,
+            "training": self.training_metadata
+        }
 
     def __repr__(self) -> str:
         return (
-            f"SegmentationProcessor(\n"
+            f"{self.__class__.__name__}(\n"
             f"  classes={self.class_names},\n"
             f"  n_neighbors={self.n_neighbors},\n"
             f"  preprocessing={self.preprocessing!r},\n"
