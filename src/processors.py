@@ -1325,8 +1325,8 @@ class SegmentationProcessor:
             * ``"crf"``: Dense CRF refinement using the input RGB image for pairwise potentials.
 
         save_file : Path, optional
-            If provided, saves the integer label array as a compressed NPZ
-            (key ``"labels"``) at this path.
+            If provided, saves the predicted results as a compressed NPZ file at the specified path.
+            The NPZ file contains the same data as the returned dictionary.
 
         Returns
         -------
