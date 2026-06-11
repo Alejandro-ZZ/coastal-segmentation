@@ -1040,30 +1040,6 @@ class SegmentationProcessor:
 
         return numpy.vstack(all_features), numpy.concatenate(all_labels)
 
-    # TODO: Check this method
-    def _assemble_label_mask(
-        self,
-        predicted_labels: numpy.ndarray,
-        yx_coords: numpy.ndarray,
-        height: int,
-        width: int,
-        roi_mask: Optional[numpy.ndarray]
-    ) -> numpy.ndarray:
-        """
-        Scatter a sparse 1-D ``predicted_labels`` array into a full ``(H, W)``
-        ``int32`` label mask. Pixels not present in ``yx_coords`` receive
-        ``postprocessing.ignore_index``.
-        """
-        ignore_index = self.postprocessing.ignore_index
-        if roi_mask is not None:
-            label_mask = numpy.full(
-                (height, width), fill_value=ignore_index, dtype=numpy.int32
-            )
-        else:
-            label_mask = numpy.empty((height, width), dtype=numpy.int32)
-        label_mask[yx_coords[:, 0], yx_coords[:, 1]] = predicted_labels
-        return label_mask
-
     @staticmethod
     def _refine_bayes(predicted_proba: numpy.ndarray, prior_proba: numpy.ndarray) -> numpy.ndarray:
         """Bayesian refinement of predicted probabilities"""
