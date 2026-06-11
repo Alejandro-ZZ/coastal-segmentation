@@ -8,6 +8,9 @@ from typing import Sequence
 from typing import Tuple
 from typing import Union
 
+import time
+from datetime import datetime, timezone
+
 import joblib
 import matplotlib.pyplot as plt
 import numpy
@@ -876,36 +879,40 @@ class SegmentationProcessor:
     Composed of two configurable internal blocks and an internal Random Forest
     classifier:
 
-    * ``preprocessing``  – :class:`PreprocessingBlock`  (colorspace, Gaussian blur)
-    * ``postprocessing`` – :class:`PostprocessingBlock` (majority filter, visualization)
-    * ``classifier``    – ``RandomForestClassifier``   (owned directly by the processor)
+    * ``preprocessing``: `PreprocessingBlock` class (colorspace, gaussian blur)
+    * ``postprocessing``: `PostprocessingBlock` class (majority filter, visualization)
+    * ``classifier``: `RandomForestClassifier`` sklearn class (owned directly by the processor)
 
-    Construct with the minimum required arguments, then configure each block via
-    its builder interface::
+    Available public methods:
 
+    * ``evaluate_classifier()``: Train and evaluate the classifier on annotated data.
+    * ``predict_image()``: Predict a label mask for a new image and apply postprocessing.
+
+    Example
+    -------
+    ::
+
+        from sklearn.ensemble import RandomForestClassifier
+
+        # Initialize the processor with the desired configuration
         processor = SegmentationProcessor(
-            classes=["Water", "Sand", "Vegetation"],
-            colors=[[0, 0, 255], [255, 255, 0], [0, 128, 0]]
+            n_neighbors=8,
+            classifier=RandomForestClassifier(n_estimators=200, random_state=0),
+            classes=["class1", "class2", "class3"]
         )
 
         # Configure preprocessing
-        processor.preprocessing \\
-            .set_colorspace("HSV") \\
-            .set_gaussian_sigma(sigma=1.5)
+        processor.preprocessing.set_colorspace("HSV").set_gaussian_sigma(sigma=1.5)
 
         # Configure postprocessing
-        processor.postprocessing \\
-            .set_majority_filter(numpy.ones((5, 5), dtype=bool)) \\
-            .set_background((10, 10, 10))
-
-        # Configure feature extraction and classifier (processor-level)
-        processor.set_neighbors(8).set_classifier(n_estimators=200, random_state=0)
+        processor.postprocessing.set_majority_filter(numpy.ones((5, 5), dtype=bool))
+        processor.postprocessing.set_background_color((10, 10, 10))
 
         # Train
         processor.evaluate_classifier(images_path, df, do_train=True)
 
         # Predict
-        result = processor.predict_image(rgb_image, roi_mask=mask)
+        results = processor.predict_image(rgb_image, roi_mask)
 
     Parameters
     ----------
@@ -977,6 +984,18 @@ class SegmentationProcessor:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _check_fitted_classifier(self):
+        # check internal state
+        invalid_msg = "Classifier is not fitted. Call 'evaluate_classifier()' with 'do_train=True' first."
+        if self.training_metadata is None:
+            raise ValueError(invalid_msg)
+
+        # Check sklearn utility
+        try:
+            sklearn.utils.validation.check_is_fitted(self.classifier)
+        except sklearn.exceptions.NotFittedError as e:
+            raise ValueError(invalid_msg) from e
+
     @staticmethod
     def _create_color_palette(num_classes: int) -> List[Sequence[int]]:
         """Generate a default color palette for the given number of classes."""
@@ -1183,15 +1202,14 @@ class SegmentationProcessor:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    # TODO: Check this method
     def evaluate_classifier(
         self,
         images_path: Path,
-        annotations_data: Any,   # pandas.DataFrame
+        annotations_data: pandas.DataFrame,
         do_train: bool = False
     ) -> dict:
         """
-        Optionally train the classifier and evaluate it on annotated pixel data.
+        Evaluate the classifier on annotated data and optionally train it.
 
         Parameters
         ----------
@@ -1199,62 +1217,105 @@ class SegmentationProcessor:
             Directory containing the images referenced in ``annotations_data``.
 
         annotations_data : pandas.DataFrame
-            DataFrame with columns: ``"ImageFile"``, ``"Cx"``, ``"Cy"``, ``"Class"``.
+            Data with required columns:
+
+            *   ``"ImageFile"``: image file name (relative to ``images_path``)
+            *   ``"Cx"``: x-coordinate of the annotated pixel
+            *   ``"Cy"``: y-coordinate of the annotated pixel
+            *   ``"Class"``: class name of the annotated pixel (must be one of the class names
+                defined in the processor)
 
         do_train : bool, optional
             If ``True``, fit the classifier before evaluating. Default is ``False``.
+            Training metadata is populated in the processor internal state.
 
         Returns
         -------
         dict
-            * ``"data"``    – ``{"n_samples", "n_features", "labels"}``
-            * ``"timings"`` – ``{"features", "fit"`` (only when ``do_train=True``), ``"predict", "total"}``
-            * ``"metrics"`` – ``{"class_report": <sklearn classification_report dict>}``
-        """
-        import time
-        from datetime import datetime, timezone
-        from sklearn.metrics import classification_report
+            Evaluation results containing the following keys:
 
+            *   ``date_UTC``: evaluation timestamp in UTC (ISO format)
+
+            *   ``data``: summary of the input data with keys:
+
+                *   ``n_samples``: number of annotated samples (pixels)
+                *   ``n_features``: number of features per sample (depends on the neighborhood size)
+                *   ``label_counts``: dictionary with the count of samples per class label
+
+            *   ``timings``: timing information for each step (feature extraction, training, prediction, total)
+
+            *   ``metrics``: classification report as returned by `sklearn.metrics.classification_report()`.
+        """
+        # Check input annotations
+        required_columns = {"ImageFile", "Cx", "Cy", "Class"}
+        if not required_columns.issubset(annotations_data.columns):
+            raise ValueError(
+                f"Annotations data must contain the following columns: {required_columns}. "
+                f"Got: {annotations_data.columns}"
+            )
+        if not numpy.issubdtype(annotations_data["Cx"].dtype, numpy.integer):
+            raise ValueError("Column 'Cx' must contain integer values representing x-coordinates.")
+        if not numpy.issubdtype(annotations_data["Cy"].dtype, numpy.integer):
+            raise ValueError("Column 'Cy' must contain integer values representing y-coordinates.")
+        if not set(annotations_data["Class"].unique()).issubset(set(self.class_names)):
+            raise ValueError(
+                "Column 'Class' contains class names that are not defined in the processor. "
+                f"Expected class names: {self.class_names}. "
+                f"Got: {annotations_data['Class'].unique()}"
+            )
+
+        # Check classifier state
+        if not do_train:
+            self._check_fitted_classifier()
+
+        step_timings: Dict[str, float] = {}
+        time_digits = 4
         t_start = time.perf_counter()
 
+        # Feature space
         t0 = time.perf_counter()
         X, y = self._build_feature_matrix(images_path, annotations_data)
-        timings: Dict[str, float] = {"features": round(time.perf_counter() - t0, 4)}
+        step_timings["features"] = round(time.perf_counter() - t0, time_digits)
 
+        # Training
         if do_train:
             t0 = time.perf_counter()
             self.classifier.fit(X, y)
-            timings["fit"] = round(time.perf_counter() - t0, 4)
+            step_timings["fit"] = round(time.perf_counter() - t0, time_digits)
 
+        # Prediction
         t0 = time.perf_counter()
         y_pred = self.classifier.predict(X)
-        timings["predict"] = round(time.perf_counter() - t0, 4)
-        timings["total"] = round(time.perf_counter() - t_start, 4)
+        step_timings["predict"] = round(time.perf_counter() - t0, time_digits)
+        step_timings["total"] = round(time.perf_counter() - t_start, time_digits)
 
-        class_report = classification_report(
+        # Evaluation
+        # `zero_division=numpy.nan` prevents empty classes from skewing reported averages.
+        class_report = sklearn.metrics.classification_report(
             y_true=y,
             y_pred=y_pred,
-            labels=list(range(len(self.class_names))),
+            labels=range(len(self.class_names)),
             target_names=self.class_names,
             output_dict=True,
-            zero_division=0
+            zero_division=numpy.nan
         )
 
+        # Data summary
+        y_unique, y_counts = numpy.unique(y, return_counts=True)
         results = {
+            "date_UTC": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
             "data": {
                 "n_samples": int(X.shape[0]),
                 "n_features": int(X.shape[1]),
-                "labels": sorted(int(v) for v in numpy.unique(y))
+                "label_counts": dict(zip(y_unique.tolist(), y_counts.tolist()))
             },
-            "timings": timings,
-            "metrics": {"class_report": class_report}
+            "timings": step_timings,
+            "metrics": class_report
         }
 
+        # Populate training metadata
         if do_train:
-            self.training_metadata = {
-                "date_UTC": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
-                **results
-            }
+            self.training_metadata = results
 
         return results
 
@@ -1313,6 +1374,7 @@ class SegmentationProcessor:
         """
         logger.debug("[Start] predict_image")
 
+        self._check_fitted_classifier()
         rgb_image = skimage.util.img_as_ubyte(rgb_image)
         height, width = rgb_image.shape[:2]
         n_classes = len(self.class_names)
