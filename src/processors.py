@@ -161,12 +161,12 @@ class NeighborhoodExtractor:
             y_coords, x_coords = yx_coordinates[:, 0], yx_coordinates[:, 1]
             if (y_coords < 0).any() or (y_coords >= height).any():
                 raise ValueError(
-                    f"Row (Y) coordinates must be in the range [0, {height - 1}]. "
+                    f"Y-coordinates must be in the range [0, {height - 1}]. "
                     f"Got: [{y_coords.min()}, {y_coords.max()}]"
                 )
             if (x_coords < 0).any() or (x_coords >= width).any():
                 raise ValueError(
-                    f"Column (X) coordinates must be in the range [0, {width - 1}]. "
+                    f"X-coordinates must be in the range [0, {width - 1}]. "
                     f"Got: [{x_coords.min()}, {x_coords.max()}]"
                 )
 
@@ -1212,6 +1212,8 @@ class SegmentationProcessor:
 
             *   ``metrics``: classification report as returned by `sklearn.metrics.classification_report()`.
         """
+        logger.debug("[Start] evaluate_classifier()")
+
         # Check input annotations
         required_columns = {"ImageFile", "Cx", "Cy", "Class"}
         if not required_columns.issubset(annotations_data.columns):
@@ -1220,9 +1222,9 @@ class SegmentationProcessor:
                 f"Got: {annotations_data.columns}"
             )
         if not numpy.issubdtype(annotations_data["Cx"].dtype, numpy.integer):
-            raise ValueError("Column 'Cx' must contain integer values representing x-coordinates.")
+            raise ValueError(f"Column 'Cx' must be integer. Got: {annotations_data['Cx'].dtype}")
         if not numpy.issubdtype(annotations_data["Cy"].dtype, numpy.integer):
-            raise ValueError("Column 'Cy' must contain integer values representing y-coordinates.")
+            raise ValueError(f"Column 'Cy' must be integer. Got: {annotations_data['Cy'].dtype}")
         if not set(annotations_data["Class"].unique()).issubset(set(self.class_names)):
             raise ValueError(
                 "Column 'Class' contains class names that are not defined in the processor. "
@@ -1283,6 +1285,7 @@ class SegmentationProcessor:
         if do_train:
             self.training_metadata = results
 
+        logger.debug("[Finish] evaluate_classifier()")
         return results
 
     def predict_image(
