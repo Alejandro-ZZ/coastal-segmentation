@@ -1152,11 +1152,12 @@ class SegmentationProcessor:
 
         # Color-dependent term, i.e. features are (x, y, r, g, b)
         # Defaults to `kernel=dcrf.DIAG_KERNEL` and `normalization=dcrf.NORMALIZE_SYMMETRIC`
-        dcrf_model.addPairwiseBilateral(sxy=80, srgb=13, rgbim=rgb_image, compat=10)
+        scale = 1 + (5 * (max(rgb_image.shape) / 3000))
+        dcrf_model.addPairwiseBilateral(sxy=20, srgb=scale, rgbim=rgb_image, compat=10)
 
         # Apply CRF inference
         # Shape (n_classes, width*height)
-        refined_proba = numpy.asarray(dcrf_model.inference(15))
+        refined_proba = numpy.asarray(dcrf_model.inference(10))
 
         # Reconstruct back to (height, width, n_classes)
         refined_proba = refined_proba.reshape((n_classes, height, width))
