@@ -1,2 +1,10 @@
-﻿.*/
+﻿# Byte-compiled / optimized / DLL files
+.*/
+
+# C extensions
 __pycache__/
+
+# Asset images
+assets/**/*.jpg
+assets/**/*.png
+assets/**/*.tif
