@@ -1,4 +1,5 @@
 import pandas
+import random
 from pathlib import Path
 from PIL import Image
 
@@ -32,3 +33,15 @@ for path_item in train_path.iterdir():
 # Save training metadata to CSV
 df = pandas.DataFrame(images_data)
 df.to_csv("assets/annotations/FRF_Duck/train_metadata.csv", index=False)
+
+# -------------------------------------------------------------------------
+
+# Select 20 random training images
+image_files = list(train_path.glob("*.jpg"))
+image_files = random.sample(population=image_files, k=20)
+
+# Save a txt file with the selected training images
+output_file = Path("assets/annotations/FRF_Duck/train_image_files.txt")
+with open(output_file, "w") as f:
+    for image_file in image_files:
+        f.write(f"{image_file.name}\n")
