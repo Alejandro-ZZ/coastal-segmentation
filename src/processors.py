@@ -1038,7 +1038,18 @@ class SegmentationProcessor:
 
     @staticmethod
     def _refine_bayes(predicted_proba: numpy.ndarray, prior_proba: numpy.ndarray) -> numpy.ndarray:
-        """Bayesian refinement of predicted probabilities"""
+        """
+        Bayesian refinement of predicted probabilities
+        
+        Parameters
+        ----------
+        predicted_proba : numpy.ndarray
+            3-D array of shape `(height, width, n_classes)` containing the predicted class probabilities.
+
+        prior_proba : numpy.ndarray
+            3-D array of shape `(height, width, n_classes)` containing the prior class probabilities. 
+            These should be derived from the training data or domain knowledge.
+        """
         logger.debug("[Start] _refine_bayes")
 
         # Validate probabilities
@@ -1078,6 +1089,14 @@ class SegmentationProcessor:
     ) -> numpy.ndarray:
         """
         Dense CRF inference over the full image grid.
+
+        Parameters
+        ----------
+        predicted_proba : numpy.ndarray
+            3-D array of shape `(height, width, n_classes)` containing the predicted class probabilities.
+        
+        rgb_image : numpy.ndarray
+            3-D array of shape `(height, width, 3)` representing the original RGB image.
 
         Notes
         -----
@@ -1362,9 +1381,10 @@ class SegmentationProcessor:
         # Shape (n_samples, n_classes)
         predicted_proba = self.classifier.predict_proba(X)
 
-        # Full predicted probabilities with uniform probability for unclassified pixels
+        # Full predicted probabilities
         # Shape (height, width, n_classes)
         if roi_mask is not None:
+            # Fill the entire image with uniform probabilities for masked-out pixels
             dummy_proba = numpy.full(
                 shape=(height, width, n_classes),
                 fill_value=1.0 / n_classes,
@@ -1372,6 +1392,9 @@ class SegmentationProcessor:
             )
             dummy_proba[roi_mask] = predicted_proba
             predicted_proba = dummy_proba
+        else:
+            # Reshape to the full image dimensions
+            predicted_proba = predicted_proba.reshape((height, width, n_classes))
 
         # Refined probabilities (optional)
         if refine is not None:
