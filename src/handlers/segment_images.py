@@ -1,17 +1,77 @@
-import time
-from pathlib import Path
-from typing import Iterable
-from typing import Optional
+"""Run a trained SegmentationProcessor on a directory of images."""
 
+from __future__ import annotations
+
+import argparse
 import joblib
 import numpy
 import skimage
-from skimage.util import img_as_ubyte
-from sklearnex import patch_sklearn
-patch_sklearn()
+import time
+
+from pathlib import Path
+from typing import Iterable
+from typing import Optional
+from typing import Sequence
 
 from src.processors import SegmentationProcessor
 
+try:
+    from sklearnex import patch_sklearn
+    patch_sklearn()
+except ImportError:
+    pass  # sklearnex is optional; if not installed, continue without patching
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the segmentation command."""
+    parser = argparse.ArgumentParser(
+        description="Segment all images in a directory with a trained processor."
+    )
+    parser.add_argument(
+        "--images",
+        type=Path,
+        required=True,
+        help="Directory containing input images.",
+    )
+    parser.add_argument(
+        "--pattern",
+        default="*.jpg",
+        help="Glob pattern used to select input images (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        required=True,
+        help="Trained SegmentationProcessor PKL file.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Directory for compressed predictions and color-label PNG files.",
+    )
+    parser.add_argument(
+        "--refine",
+        choices=("none", "bayes", "crf"),
+        default="none",
+        help="Optional spatial refinement (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--roi-mask",
+        type=Path,
+        help="Optional binary image mask; only nonzero pixels are segmented.",
+    )
+    parser.add_argument(
+        "--class-priors",
+        type=Path,
+        help="Spatial class-prior NPY file; required for --refine bayes.",
+    )
+    return parser
+
+
+def _require_file(parser: argparse.ArgumentParser, path: Path, option: str) -> None:
+    if not path.is_file():
+        parser.error(f"{option} does not exist or is not a file: {path}")
 
 def segment_images(
         image_files: Iterable[Path],
@@ -79,71 +139,40 @@ def segment_images(
         color_labels_path.mkdir(parents=True, exist_ok=True)
         skimage.io.imsave(
             fname=color_labels_path / f"{image_file.stem}.png",
-            arr=img_as_ubyte(predict_results["color_labels"])
+            arr=skimage.util.img_as_ubyte(predict_results["color_labels"])
         )
 
-# ==========  Handlers for specific datasets  ==========
-def PHO_handler():
-    """Segment PHCO images"""
-    n_neighbors = 24
-    data_names = ["train_points", "test_polygons"]
-    refine_methods = {
-        "RF": None,
-        "RF-Bayes": "bayes",
-        "RF-CRF": "crf"
-    }
 
-    model_file = Path(f"results/models/PHCO_{n_neighbors}NN_SegmentationProcessor.pkl")
-    priors_file = Path("assets/annotations/PHCO/class_priors.npy")
-    roi_mask_file = Path("assets/annotations/PHCO/roi_rectify_mask.png")
+def main(argv: Sequence[str] | None = None) -> None:
+    """Parse arguments and segment the selected images."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
-    print("\n==========  PHCO Image Segmentation  ==========")
-    print("Number of neighbors:", n_neighbors)
-    print(f"Model file: {model_file}")
-    print(f"Class priors file: {priors_file}\n")
+    # Validate input arguments
+    if not args.images.is_dir():
+        parser.error(f"--images does not exist or is not a directory: {args.images}")
+    _require_file(parser, args.model, "--model")
+    if args.roi_mask is not None:
+        _require_file(parser, args.roi_mask, "--roi-mask")
+    if args.class_priors is not None:
+        _require_file(parser, args.class_priors, "--class-priors")
+    if args.refine == "bayes" and args.class_priors is None:
+        parser.error("--class-priors is required when --refine bayes is selected.")
 
-    for data_name in data_names:
-        for refine_name, refine_method in refine_methods.items():
-            print(f"Data: {data_name} \t Model: {refine_name} \t Neighbors: {n_neighbors}")
-            segment_images(
-                image_files=Path(f"assets/annotations/PHCO/{data_name}").glob("*.tif"),
-                processor_file=model_file,
-                output_path=Path(f"results/predictions/PHCO/{data_name}/{n_neighbors}NN/{refine_name}"),
-                refine=refine_method,
-                roi_mask_file=roi_mask_file,
-                class_priors_file=priors_file if refine_method == "bayes" else None
-            )
-            print()
+    image_files = sorted(args.images.glob(args.pattern))
+    if not image_files:
+        parser.error(f"No images match {args.pattern!r} in {args.images}")
 
-def FRF_Duck_handler():
-    """Segment FRF Duck images"""
-    data_names = ["test_c1", "test_c6"]
-    refine_methods = {
-        "RF": None,
-        "RF-Bayes": "bayes",
-        "RF-CRF": "crf"
-    }
 
-    model_file = Path("results/models/FRF_Duck_24NN_SegmentationProcessor.pkl")
-    priors_file = Path("assets/annotations/FRF_Duck/class_priors.npy")
+    segment_images(
+        image_files=image_files,
+        processor_file=args.model,
+        output_path=args.output,
+        refine=None if args.refine == "none" else args.refine,
+        roi_mask_file=args.roi_mask,
+        class_priors_file=args.class_priors,
+    )
 
-    print("\n==========  FRF Duck Image Segmentation  ==========")
-    print(f"Model file: {model_file}")
-    print(f"Class priors file: {priors_file}\n")
-    for data_name in data_names:
-        for refine_name, refine_method in refine_methods.items():
-            # Class priors were computed only for C1 camera (train and test_c1 datasets)
-            if refine_method == "bayes" and data_name == "test_c6":
-                continue
 
-            print(f"Data: {data_name} \t Model: {refine_name}")
-            segment_images(image_files=Path(f"assets/annotations/FRF_Duck/{data_name}/images").glob("*.jpg"),
-                           processor_file=model_file,
-                           output_path=Path(f"results/segmentations/FRF_Duck/{data_name}/{refine_name}"),
-                           refine=refine_method, roi_mask_file=None,
-                           class_priors_file=priors_file if refine_method == "bayes" else None)
-            print()
-
-# Execution: python -m src.handlers.segment_images
 if __name__ == "__main__":
-    PHO_handler()
+    main()
