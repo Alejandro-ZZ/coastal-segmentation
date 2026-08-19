@@ -24,15 +24,20 @@ def load_json_file(json_fpath: Union[str, Path]) -> dict:
 
     # Check that the file exists
     if not json_fpath.exists():
-        error_msg = f"JSON file not found: '{json_fpath}'"
+        error_msg = f"JSON file not found. File: '{json_fpath}'"
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
     # Read the JSON file
-    with json_fpath.open("rb") as f: # encoding='utf-8'
-        json_data = json.load(f)
-    # with open(json_fpath, "rb") as f:
-    #     json_data = json.load(f)
+    try:
+        with json_fpath.open("rb") as f: # encoding='utf-8'
+            json_data = json.load(f)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Invalid JSON. File: '{json_fpath}'. Error: {error}")
+
+    # Check loaded data type
+    if not isinstance(json_data, dict):
+        raise ValueError(f"Invalid JSON structure, expected a dictionary. File: '{json_fpath}'. Got type: {type(json_data).__name__}")
 
     logger.debug("[Finish] load_json_file")
     return json_data
