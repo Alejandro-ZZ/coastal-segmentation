@@ -36,6 +36,8 @@ DATASET_NAMES = ("train", "test_c1", "test_c6")
 TARGET_SHAPE = (2048, 2448)
 
 
+# CLI ARGUMENT PARSER
+# --------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for FRF Duck asset preparation."""
     parser = argparse.ArgumentParser(
@@ -80,9 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-    
-# DATASET DOWNLOAD, EXTRACTION, AND INSTALLATION
-# -----------------------------------------------
+# MAIN HANDLER DEFINITIONS
+# --------------------------------------------------
+# --- Dataset downloading, extraction, and installation ---
 def extract_zip_archive(archive_path: Path, destination: Path) -> None:
     """Extract a ZIP archive while rejecting paths outside its staging directory."""
     destination.mkdir(parents=True, exist_ok=True)
@@ -126,9 +128,7 @@ def install_directory(source: Path, destination: Path, overwrite: bool) -> None:
     print(f"Installed: {destination}")
 
 
-
-# DATASET PREPROCESSING
-# -----------------------------------------------
+# --- Dataset preprocessing ---
 def clean_jpg_mask(labels_arr, num_classes, filter_size):
     """
     Cleans a noisy JPG segmentation mask using morphological operations.
@@ -307,6 +307,8 @@ def preprocess_datasets(dataset_dirs: Iterable[Path], overwrite: bool) -> None:
             normalize_training_assets(dataset_dir)
 
 
+# MAIN EXECUTION
+# --------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> None:
     """Download and prepare requested FRF Duck assets."""
     # Build the argument parser

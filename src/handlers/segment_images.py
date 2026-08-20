@@ -22,6 +22,8 @@ except ImportError:
     pass  # sklearnex is optional; if not installed, continue without patching
 
 
+# CLI ARGUMENT PARSER
+# --------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the segmentation command."""
     parser = argparse.ArgumentParser(
@@ -69,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# MAIN HANDLER DEFINITIONS
+# --------------------------------------------------
 def _require_file(parser: argparse.ArgumentParser, path: Path, option: str) -> None:
     if not path.is_file():
         parser.error(f"{option} does not exist or is not a file: {path}")
@@ -143,6 +147,8 @@ def segment_images(
         )
 
 
+# MAIN EXECUTION
+# --------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse arguments and segment the selected images."""
     parser = build_parser()

@@ -18,6 +18,8 @@ from src.utils import load_json_file
 from src.utils import save_json_file
 
 
+# CLI ARGUMENT PARSER
+# --------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for Random Forest processor training."""
     parser = argparse.ArgumentParser(
@@ -43,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# MAIN HANDLER DEFINITIONS
+# --------------------------------------------------
 def create_segmentation_processor(
         n_neighbors: int,
         colorspace: str,
@@ -115,8 +119,8 @@ def create_segmentation_processor(
     save_json_file(output_file.with_suffix(".json"), json_data=processor.get_metadata())
 
 
-
-
+# MAIN EXECUTION
+# --------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse arguments and train a SegmentationProcessor."""
     parser = build_parser()
