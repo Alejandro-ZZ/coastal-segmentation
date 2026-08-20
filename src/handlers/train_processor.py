@@ -28,12 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--classes-config", type=Path, required=True, help="JSON containing classes and/or palette arrays.")
     parser.add_argument("--neighbors", type=int, choices=(0, 8, 24), required=True, help="Neighborhood size.")
     parser.add_argument("--colorspace", default="RGB", help="Preprocessing color space (default: %(default)s).")
-    parser.add_argument("--output", type=Path, required=True, help="Output model base path; .pkl and .json are written.")
+    parser.add_argument("--output", type=Path, required=True, help="Output artifacts path: PKL and JSON files.")
     parser.add_argument("--split", help="Optional Split-column value used to select training rows.")
     parser.add_argument(
         "--coerce-coordinates",
         action="store_true",
-        help="Convert 'Cx' and 'Cy' values to unsigned integers before training.",
+        help="Convert 'Cx' and 'Cy' values to integers before training.",
     )
     parser.add_argument(
         "--classifier-params",

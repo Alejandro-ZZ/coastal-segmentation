@@ -11,6 +11,7 @@ This repository contains the code, trained artifacts, and experiment assets for 
     * [Train processor](#️-train-processor)
     * [Segment images](#-segment-images)
 * [Deep Learning Baselines](#-deep-learning-baselines)
+* [Python Users](#-python-users)
 
 
 
@@ -18,9 +19,8 @@ This repository contains the code, trained artifacts, and experiment assets for 
 
 1. Clone the repository.
 
-TODO: Update repo URL
 ```bash
-git clone --depth 1 https://github.com/yourusername/coastal-segmentation.git
+git clone --depth 1 https://github.com/Alejandro-ZZ/coastal-segmentation.git
 ```
 
 The `--depth 1` option creates a shallow clone with only the latest commit, which is sufficient for running the code.
@@ -93,9 +93,43 @@ TensorFlow should load the extracted model from `results/models/FRF_mar15_remap_
 
 ## 🚀 Usage
 
+> **NOTE:** The below multi-line commands are for Linux/macOS. For Windows users, break the command into multiple lines with `^` instead of `\` at the end of each line.
+
 ### ⚙️ Train processor
 
-The below handler fits the Random-Forest-based pipeline directly from CSV point annotations, saving a serialized `.pkl` processor and matching `.json` metadata. The parameters in `assets/RF_params_24NN.json` are selected by neighborhood size. The fixed seed and parallel configuration in the legacy paper handler are `random_state=23` and `n_jobs=-1`; include these values in a copied parameter JSON when a fully identical retraining configuration is required.
+* The `train_processor` handler fits the Random-Forest-based pipeline directly from CSV point annotations. 
+
+#### Inputs
+
+| Parameter | Description |
+|---|---|
+| --images | Directory containing training images. |
+| --annotations | CSV file with `ImageFile`, `Cx`, `Cy`, and `Class` columns. |
+| --classes-config | JSON containing classes and/or palette arrays. |
+| --neighbors | Neighborhood size. Possible values: 0, 8, 24. |
+| --colorspace | Preprocessing color space (default: RGB). For possible values see [skimage.color.convert_colorspace](https://scikit-image.org/docs/stable/api/skimage.color.html#skimage.color.convert_colorspace)  |
+| --output | Output artifacts path: PKL and JSON files. |
+| --split | Optional `Split`-column value used to select training rows. See below PHCO example. |
+| --coerce-coordinates | Convert `Cx` and `Cy` values to integers before training. |
+| --classifier-params | JSON object of scikit-learn RandomForestClassifier parameters. |
+
+
+* See detailed command-line help with: 
+
+```bash
+python -m src.handlers.train_processor --help
+```
+
+* The parameters in `assets/RF_params_24NN.json` file are the found optimal values of Ranfom Forest for 24 nearest neighbors. The fixed seed and parallel configuration in the legacy paper handler are `random_state=23` and `n_jobs=-1`; include these values in a copied parameter JSON when a fully identical retraining configuration is required.
+
+#### Outputs
+
+* Serialized PKL file with the `SegmentationProcessor` instance. 
+
+* Structured JSON file with the complete processor metadata.
+
+
+#### FRF Duck - 24NN
 
 ```bash
 python -m src.handlers.train_processor \
@@ -108,7 +142,11 @@ python -m src.handlers.train_processor \
   --output results/models/FRF_Duck_24NN
 ```
 
-For Pehuen Co (PHCO), select the training partition and convert rectified floating-point coordinates before fitting:
+#### Pehuen Co (PHCO) - 24NN
+
+* `--split train`: selects only the training samples (i.e., the rows with `Split` column value `train`) from the CSV point annotations. 
+
+* `--coerce-coordinates`: converts the rectified floating-point coordinates (columns `Cx` and `Cy`) before fitting.
 
 ```bash
 python -m src.handlers.train_processor \
@@ -123,34 +161,146 @@ python -m src.handlers.train_processor \
   --output results/models/PHCO_24NN
 ```
 
-> **NOTE:** for Windows OS break the command into multiple lines with `^` instead of `\` at the end of each line, or run it in a single line without line breaks.
 
-The core `SegmentationProcessor` class encapsulates the complete Random Forest and neighboring process. See the complete documentation in `src/processors.py` for details on the class and its methods. An example usage is provided below:
+### 📷 Segment images
+
+#### Inputs
+
+| Parameter | Description |
+|---|---|
+| --images | Directory containing input images. |
+| --pattern | Glob pattern used to select input images (default: *.jpg). |
+| --model | Trained `SegmentationProcessor` PKL file. |
+| --output | Directory for compressed predictions and color-label PNG files. |
+| --refine | Optional spatial refinement. Possible values: `none` (default), `bayes`, `crf` |
+| --roi-mask | Optional binary image file mask. Only nonzero pixels are segmented. |
+| --class-priors | Spatial class-prior NPY file. Required for `--refine bayes`. |
+
+#### Outputs
+
+* A compressed NumPy array (`.npz`) of predicted class labels for each pixel, saved as `{image_stem}.npz` in the given `{--output}/` directory. 
+
+* A colorized PNG of the predictions, saved as `{image_stem}.png` in the `{--output}/color_labels` directory.
+
+#### Examples
+
+1. Raw inference (no refinement)
+
+```bash
+python -m src.handlers.segment_images \
+  --images assets/annotations/FRF_Duck/test_c1/images \
+  --pattern "*.jpg" \
+  --model results/models/FRF_Duck_24NN_SegmentationProcessor.pkl \
+  --output results/predictions/FRF_Duck/test_c1/24NN/RF
+```
+
+2. Inference with spatial Bayesian prior
+
+```bash
+python -m src.handlers.segment_images \
+  --images assets/annotations/FRF_Duck/test_c1/images \
+  --pattern "*.jpg" \
+  --model results/models/FRF_Duck_24NN_SegmentationProcessor.pkl \
+  --output results/predictions/FRF_Duck/test_c1/24NN/RF-Bayes \
+  --refine bayes \
+  --class-priors assets/annotations/FRF_Duck/class_priors.npy \
+```
+
+3. Inference with dense CRF
+
+```bash
+python -m src.handlers.segment_images \
+  --images assets/annotations/FRF_Duck/test_c1/images \
+  --pattern "*.jpg" \
+  --model results/models/FRF_Duck_24NN_SegmentationProcessor.pkl \
+  --output results/predictions/FRF_Duck/test_c1/24NN/RF-CRF \
+  --refine crf
+```
+
+## 🧠 Deep Learning Baselines
+
+...
+
+## 🐍 Python Users
+
+* The core `SegmentationProcessor` class encapsulates the complete classifier-based and feature extraction process. See the complete documentation in `src/processors.py` for details on the class and its methods. 
+
+### Create instace
+
+* You can use any scikit-learn-like classifier, supporting the `fit`, `predict`, and `predict_proba` methods. 
+
+* `colors` parameter is optional. If not provided, the processor will use a default color palette for visualization.
+
+```python
+from src.processors import SegmentationProcessor
+
+processor = SegmentationProcessor(
+    n_neighbors=24,
+    classifier=RandomForestClassifier(),
+    classes=["class1", "class2", "class3"],
+    colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],  
+)
+```
+
+### Preprocessing
+
+* The processor have a `preprocessing` attribute of type `PreprocessingBlock` that can be used to apply color space conversion and other preprocessing steps to images before feature extraction. 
+
+* **Colorspace:** set the color space from which the features are extracted. The default is RGB, but you can change it to other color spaces supported by [skimage.color.convert_colorspace](https://scikit-image.org/docs/stable/api/skimage.color.html#skimage.color.convert_colorspace).
+
+```python
+processor.preprocessing.set_colorspace("YIQ")
+```
+
+* **Gaussian smoothing:** apply Gaussian filter to the images before feature extraction. A value of 0 (default) means no smoothing.
+
+```python
+processor.preprocessing.set_gaussian_sigma(1.0)
+```
+
+### Postprocessing
+
+* The processor have a `postprocessing` attribute of type `PostprocessingBlock` that can be used to apply custom postprocessing steps to the predictions.
+
+* **Background color:** set the background color for the output color label images. The default is black. This relevant when segmenting images using a ROI mask.
+
+```python
+processor.postprocessing.set_background_color([0, 0, 0])
+```
+
+* **Majority filter:** footprint to apply a majority filter to the predicted labels to remove small isolated regions. The neighborhood footprint must be expressed as a 2-D array of 1’s and 0’s. A value of `None` (default) means no filtering. See more details in [skimage.filters.rank.majority](https://scikit-image.org/docs/stable/api/skimage.filters.rank.html#skimage.filters.rank.majority)
+
+```python
+from skimage.morphology import disk
+
+processor.postprocessing.set_majority_filter_size(
+    footprint=disk(3)
+)
+```
+
+### Train
+
+* When training the processor, the results are also populated in the `training_metadata` class attribute. See below evaluation section for details on the structure of the results.
 
 ```python
 import pandas
-from pprint import pprint
-from src.processors import SegmentationProcessor
+from pathlib import Path
 
-# Dummy dataset
-dataset = pandas.DataFrame({
-    "ImageFile": ["image1.jpg", "image2.jpg"],
-    "Cx": [100, 150],
-    "Cy": [200, 250],
-    "Class": ["class1", "class2"]
-})
+# Images path
+img_path = Path("assets/annotations/FRF_Duck/train/images")
 
-# Create a SegmentationProcessor instance with the desired configuration
-processor = SegmentationProcessor(
-    n_neighbors=24,
-    colorspace="YIQ",
-    classes=["class1", "class2", "class3"],
-    colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],  # RGB values for each class
-    classifier_params={"n_estimators": 100, "max_depth": None},
+# Dataset
+dataset_file = "results/datasets/FRF_Duck/dataset_points.csv"
+dataset = pandas.read_csv(dataset_file)
+
+# Fit and evaluate the processor
+train_results = processor.evaluate_classifier(
+    images_path=img_path,
+    annotations_data=dataset,
+    do_train=True
 )
-
-# Train the processor using the dataset and images path
-processor.train(images_path="path/to/images", annotations_data=dataset)
+pprint(train_results)
+print("\n")
 
 # Save the trained processor to a file
 processor.save("path/to/save/processor.pkl")
@@ -160,47 +310,61 @@ metadata = processor.get_metadata()
 pprint(metadata)
 ```
 
-### 📷 Segment images
+### Evaluate
 
-1. Raw inference (no refinement):
+* If you have a validation/test subset, you can evaluate the processor after training using `do_train=False` and passing the validation/test dataset to `evaluate_classifier`.
 
-```bash
-python -m src.cli.segment_images \
-  --images assets/annotations/FRF_Duck/test_c1/images \
-  --pattern "*.jpg" \
-  --model results/models/FRF_Duck_24NN_SegmentationProcessor.pkl \
-  --output results/predictions/FRF_Duck/test_c1/24NN/RF
+```python
+eval_results = processor.evaluate_classifier(
+    images_path=img_path,
+    annotations_data=dataset,
+    do_train=False
+)
+pprint(eval_results)
 ```
 
-2. Inference with spatial Bayesian prior:
+Evaluation results is a dictionary containing the following keys:  
 
-```bash
-python -m src.cli.segment_images \
-  --images assets/annotations/FRF_Duck/test_c1/images \
-  --pattern "*.jpg" \
-  --model results/models/FRF_Duck_24NN_SegmentationProcessor.pkl \
-  --output results/predictions/FRF_Duck/test_c1/24NN/RF-Bayes \
-  --refine bayes \
-  --class-priors assets/annotations/FRF_Duck/class_priors.npy \
+* ``date_UTC``: evaluation timestamp in UTC (ISO format).
+
+* ``data``: summary of the input data with keys:
+
+    * ``n_samples``: number of annotated samples (pixels)
+    * ``n_features``: number of features per sample (depends on the neighborhood size)
+    * ``label_counts``: dictionary with the count of samples per class label
+
+*   ``timings``: timing information for each step (feature extraction, training, prediction, total)
+
+*   ``metrics``: classification report as returned by `sklearn.metrics.classification_report()`.
+
+### Segment image
+
+* You can segment a single image using the trained processor.
+
+```python
+import skimage
+
+# Input image
+img_file = "assets/annotations/FRF_Duck/test_c1/images/FRF_c1_snap_20161107160000_EBG.jpg"
+img = skimage.io.imread(img_file)
+
+# Segment the image with optional refinement
+results = processor.segment_image(
+    rgb_image=img, 
+    refine="crf"
+)
 ```
 
-3. Inference with dense CRF:
+Predicted results data is a dictionary containing the following keys:
+            
+*   ``"classes"``: List of class names corresponding to the predicted labels.
 
-```bash
-python -m src.cli.segment_images \
-  --images assets/annotations/FRF_Duck/test_c1/images \
-  --pattern "*.jpg" \
-  --model results/models/FRF_Duck_24NN_SegmentationProcessor.pkl \
-  --output results/predictions/FRF_Duck/test_c1/24NN/RF-CRF \
-  --refine crf
-```
+*   ``"image"``: The original input RGB image.
 
-The handlers creates two outputs:
+*   ``"class_proba"``: predicted class probabilities. 3D array as `(height, width, n_classes)`
 
-* A compressed NumPy array (`.npz`) of predicted class labels for each pixel, saved as `{image_stem}.npz` in the `{--output}/` directory.
+*   ``"labels"``: predicted class labels. 2D integer array as `(height, width)`.
 
-* A colorized PNG of the predicted labels, saved as `{image_stem}.png` in the `{--output}/color_labels` directory.
+*   ``"color_labels"``: color-coded image labels. 3D uint8 RGB array as `(height, width, 3)`.
 
-## 🧠 Deep Learning Baselines
-
-...
+*   ``"overlay"``: overlay visualization. 3D uint8 RGB array of shape `(height, width, 3)`.
