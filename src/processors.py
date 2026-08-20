@@ -597,7 +597,10 @@ class PostprocessingBlock:
         for color in colors:
             self._check_color(color)
             if tuple(color) == (0, 0, 0):
-                raise ValueError("Class colors cannot be black (0, 0, 0) as it is reserved for background.")
+                raise ValueError(
+                    "Initial class colors cannot be black (0, 0, 0) as it is reserved for background."
+                    "This can be changed latter using the `set_background_color()` method."
+                )
 
         self.colors: List[tuple] = [tuple(c) for c in colors]
         self.ignore_index: int = len(colors)
@@ -619,6 +622,7 @@ class PostprocessingBlock:
                 raise ValueError(f"Color values must be in the range [0, 255]. Got: {color}")
         logger.debug("[Finish] _check_color")
 
+    # TODO: Include code logic compatibility with logit predictions (i.e., softmax not applied yet)
     def _check_predicted_proba(self, predicted_proba: numpy.ndarray):
         logger.debug("[Start] _check_predicted_proba")
         if not isinstance(predicted_proba, numpy.ndarray):
@@ -647,7 +651,7 @@ class PostprocessingBlock:
         logger.debug("[Finish] _check_predicted_proba")
 
     # ------------------------------------------------------------------
-    # Builder methods (fluent interface)
+    # Builder methods
     # ------------------------------------------------------------------
     def set_background_color(self, color: Tuple[int, int, int]) -> "PostprocessingBlock":
         """Set the RGB color used for background / masked-out pixels in the visualization."""
@@ -675,6 +679,7 @@ class PostprocessingBlock:
     # ------------------------------------------------------------------
     # Core method
     # ------------------------------------------------------------------
+    # TODO: Include majority filter with SLIC superpixel segmentation
     def _apply_majority_filter(
             self,
             predicted_labels: numpy.ndarray,
@@ -796,6 +801,12 @@ class PostprocessingBlock:
 
         # Check predicted probabilities
         self._check_predicted_proba(predicted_proba)
+
+        # Check image and predictions shape match (required for overlay creation)
+        if image.shape[:2] != predicted_proba.shape[:2]:
+            raise ValueError(
+                f"Image shape {image.shape[:2]} does not match predictions shape {predicted_proba.shape[:2]}"
+            )
 
         # Labels data type
         n_labels = predicted_proba.shape[2] + 1  # +1 for ignore_index

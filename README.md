@@ -1,12 +1,16 @@
 # Coastal Segmentation
 
-This repository contains the code, trained artifacts, and experiment assets for pixel-wise semantic segmentation of coastal imagery. The primary workflow trains a Random Forest on local color neighborhoods and optionally refines class probabilities with spatial Bayesian priors or a dense Conditional Random Field (CRF). Reference notebooks provide the Segment Anything Model (SAM), U-Net, and ResUNet baselines used in the study.
+This repository contains the code, trained artifacts, and experiment assets for pixel-wise semantic segmentation of coastal imagery. The primary workflow trains a **Random Forest** on local color neighborhoods and optionally refines class probabilities with spatial **Bayesian priors** or a dense **Conditional Random Field** (CRF). Reference notebooks provide the Segment Anything Model (**SAM**), **U-Net**, and **ResUNet** baselines used in the study.
 
-## Table of Contents
+The command-line interface in `src/handlers/` supports reproducible feature extraction, model fitting, spatial-prior generation, and batch inference. Run every command from the repository root.
 
+## 📋 Table of Contents
+
+* [Repository Layout](#-repository-layout)
 * [Installation](#️-installation)
 * [Duck Data Retrieval](#-duck-data-retrieval)
 * [Prior Probabilities](#-prior-probabilities)
+* [Expected data](#️-expected-data)
 * [Usage](#-usage)
     * [Train processor](#️-train-processor)
     * [Segment images](#-segment-images)
@@ -14,31 +18,39 @@ This repository contains the code, trained artifacts, and experiment assets for 
 * [Python Users](#-python-users)
 
 
+## 📂 Repository Layout
+
+...
 
 ## ⬇️ Installation
 
-1. Clone the repository.
+### Computational requirements
+
+* **Minimum (Random Forest pipelines):** Executable on standard consumer laptops (Dual-core CPU, 8 GB RAM). Training is highly parallelized.
+
+* **Recommended (Deep learning):** NVIDIA GPU with $\ge$ 12 GB VRAM (for SAM ViT-H inference and dense UNet/ResUNet training). Experiments were conducted on a free Google Colab T4 GPU (16 GB VRAM).
+
+> **Note:** Random Forest feature extraction and inference operate on every image pixel at prediction time. Memory and runtime therefore increase with both image resolution and neighborhood size: a $D24$ feature vector contains 75 channel values per pixel before classifier computation. The CPU pipeline uses all available cores when the serialized Random Forest was trained with `n_jobs=-1`.
+
+### Dependencies
+
+* We recommend using a virtual environment to isolate the project dependencies. The project requires Python 3.11 or higher.
+
+* When cloning the repository, use the `--depth 1` option to create a shallow clone with only the latest commit, which is sufficient for running the code.
 
 ```bash
+# Clone the repository
 git clone --depth 1 https://github.com/Alejandro-ZZ/coastal-segmentation.git
-```
 
-The `--depth 1` option creates a shallow clone with only the latest commit, which is sufficient for running the code.
-
-2. Create and activate a virtual environment (optional but recommended using conda):
-
-```bash
+# Create and activate a virtual environment 
+# (conda is optional but recommended)
 conda create -n coast-segment python=3.11
 conda activate coast-segment
-```
 
-3. Install the required dependencies:
-
-```bash
+# Install the required dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
-
-
 
 ## 📥 Duck Data Retrieval
 
@@ -89,7 +101,63 @@ TensorFlow should load the extracted model from `results/models/FRF_mar15_remap_
 
 ## 📊 Prior Probabilities
 
-...
+The Bayesian refinement method requires same-size, aligned integer label masks. For FRF Duck, `--duck-labels` applies the project’s label resizing and six-to-four class remapping before computing a $(H, W, C)$ prior tensor.
+
+```bash
+python -m src.handlers.create_priors \
+  --labels assets/annotations/FRF_Duck/train/labels \
+  --pattern "*.png" \
+  --duck-labels \
+  --n-classes 4 \
+  --output assets/annotations/FRF_Duck/class_priors.npy
+```
+
+Custom mask generator can be created by adding a subclass of `BaseMaskGenerator` to adapt mask processing for other datasets. See code details in `src/handlers/create_priors.py` and the `ImageMaskGenerator` and `DuckMaskGenerator` classes.
+
+## ⚠️ Expected data
+
+### Class configuration
+
+The `train_processor` recieves a `--classes-config` argument. This must be a JSON object with ordered `classes` and optional RGB `palette` arrays. Array position defines the integer label used by the model, so both order and length are part of the model contract. Example:
+
+```json
+{
+  "classes": [
+        "background", 
+        "sand", 
+        "vegetation", 
+        "lag"
+    ],
+  
+  "palette": [
+        [1, 1, 255], 
+        [255, 255, 1], 
+        [1, 255, 1], 
+        [255, 1, 1]
+    ]
+}
+```
+
+### CSV annotations
+
+The expected training and feature-extraction annotation files use one row per annotated pixel:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `ImageFile` | string | Image filename relative to the handler input `--images` diretory |
+| `Cx` | integer | Zero-based horizontal pixel coordinate |
+| `Cy` | integer | Zero-based vertical pixel coordinate |
+| `Class` | string | Class name; required for training and must be present in `classes_config.json` |
+| `Split` | string | Optional partition label used by `train_processor --split` |
+
+Coordinates must reference valid pixels in their corresponding images. `train_processor` requires integer coordinates; use `--coerce-coordinates` only for known rectified coordinates that require conversion.
+
+
+### Spatial mask and priors
+
+For standard prior construction, labels must be two-dimensional integer images with values from `0` through `n_classes - 1`, all with identical dimensions. The saved `class_priors.npy` has shape `(height, width, n_classes)`, values in `[0, 1]`, and class probabilities summing to one for every pixel.
+
+An optional ROI mask passed to `segment_images --roi-mask` is a binary image. Only nonzero mask pixels are classified. Output labels outside the ROI use the processor’s ignore index and probabilities are uniform.
 
 ## 🚀 Usage
 
@@ -98,6 +166,8 @@ TensorFlow should load the extracted model from `results/models/FRF_mar15_remap_
 ### ⚙️ Train processor
 
 * The `train_processor` handler fits the Random-Forest-based pipeline directly from CSV point annotations. 
+
+* Model serialization uses `joblib`. Load processors with compatible Python and scikit-learn versions.
 
 #### Inputs
 
@@ -178,9 +248,18 @@ python -m src.handlers.train_processor \
 
 #### Outputs
 
-* A compressed NumPy array (`.npz`) of predicted class labels for each pixel, saved as `{image_stem}.npz` in the given `{--output}/` directory. 
+For every source image, the segmentation command stores:
 
-* A colorized PNG of the predictions, saved as `{image_stem}.png` in the `{--output}/color_labels` directory.
+* A compressed NumPy array (NPZ file) saved as `{image_stem}.npz` under the given `--output` directory. The compressed NPZ contains:
+
+    - `classes`: ordered class names.
+    - `image`: source RGB image.
+    - `class_proba`: $(H, W, C)$ posterior probabilities.
+    - `labels`: $(H, W)$ integer labels.
+    - `color_labels`: RGB palette visualization.
+    - `overlay`: source image blended with the palette visualization.
+
+* A colorized PNG segmented image, saved as `{image_stem}.png` under the `--output/color_labels` directory.
 
 #### Examples
 
