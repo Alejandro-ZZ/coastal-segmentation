@@ -19,6 +19,8 @@ The command-line interface in `src/handlers/` supports reproducible feature extr
 
 
 ## 📂 Repository Layout
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
+
 
 ```text
 coastal-segmentation/
@@ -70,6 +72,7 @@ Downloaded Duck images, extracted labels, trained models, predictions, and local
 
 
 ## ⬇️ Installation
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
 
 ### Computational requirements
 
@@ -100,8 +103,9 @@ pip install -r requirements.txt
 ```
 
 ## 📥 Duck Data Retrieval
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
 
-The Duck dataset was presetned on an [Springer Conference paper](https://link.springer.com/chapter/10.1007/978-3-032-15477-4_55) and is a collection of coastal images used for validating the segmentation pipelines. The complete assets are available in the [Zenodo records](https://zenodo.org/records/7075342):
+The Duck dataset was presented on an [Springer Conference paper](https://link.springer.com/chapter/10.1007/978-3-032-15477-4_55) and is a collection of coastal images used for validating the segmentation pipelines. The complete assets are available in the [Zenodo records](https://zenodo.org/records/7075342):
 
 | Resource | Zenodo record | Required extracted directory |
 | --- | --- | --- |
@@ -147,6 +151,7 @@ TensorFlow should load the extracted model from `results/models/FRF_mar15_remap_
 
 
 ## 📊 Prior Probabilities
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
 
 The Bayesian refinement method requires same-size, aligned integer label masks. For FRF Duck, `--duck-labels` applies the project’s label resizing and six-to-four class remapping before computing a $(H, W, C)$ prior tensor.
 
@@ -164,6 +169,7 @@ python -m src.handlers.create_priors \
 Custom mask generator can be created by adding a subclass of `BaseMaskGenerator` to adapt mask processing for other datasets. See code details in `src/handlers/create_priors.py` and the `ImageMaskGenerator` and `DuckMaskGenerator` classes.
 
 ## ⚠️ Expected data
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
 
 ### Class configuration
 
@@ -209,6 +215,7 @@ For standard prior construction, labels must be two-dimensional integer images w
 An optional ROI mask passed to `segment_images --roi-mask` is a binary image. Only nonzero mask pixels are classified. Output labels outside the ROI use the processor’s ignore index and probabilities are uniform.
 
 ## 🚀 Usage
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
 
 > **NOTE:** The below multi-line commands are for Linux/macOS. For Windows users, break the command into multiple lines with `^` instead of `\` at the end of each line.
 
@@ -346,6 +353,7 @@ python -m src.handlers.segment_images \
 ```
 
 ## 🧠 Deep Learning Baselines
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
 
 The reference workflows for SAM and dense supervised Unet models are notebooks developed for a [Google Colab](https://colab.research.google.com/) T4 GPU and may also run locally with a compatible CUDA/TensorFlow or PyTorch installation. Use the downloaded ResUNet directory described in [Duck Data Retrival](#-duck-data-retrieval) when loading the published TensorFlow model.
 
@@ -472,6 +480,7 @@ pred_mask = results["labels"]
 
 
 ## 🐍 Python Users
+<p style="text-align: right;"><a href="#-table-of-contents">[🏠 Go top]</a></p>
 
 * The core `SegmentationProcessor` class encapsulates the complete classifier-based and feature extraction process. See the complete documentation in `src/processors.py` for details on the class and its methods. 
 
