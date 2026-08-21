@@ -6,21 +6,68 @@ The command-line interface in `src/handlers/` supports reproducible feature extr
 
 ## 📋 Table of Contents
 
-* [Repository Layout](#-repository-layout)
-* [Installation](#️-installation)
-* [Duck Data Retrieval](#-duck-data-retrieval)
-* [Prior Probabilities](#-prior-probabilities)
-* [Expected data](#️-expected-data)
-* [Usage](#-usage)
-    * [Train processor](#️-train-processor)
-    * [Segment images](#-segment-images)
-* [Deep Learning Baselines](#-deep-learning-baselines)
-* [Python Users](#-python-users)
+* [📂 Repository Layout](#-repository-layout)
+* [⬇️ Installation](#️-installation)
+* [📥 Duck Data Retrieval](#-duck-data-retrieval)
+* [📊 Prior Probabilities](#-prior-probabilities)
+* [⚠️ Expected data](#️-expected-data)
+* [🚀 Usage](#-usage)
+    * [⚙️ Train processor](#️-train-processor)
+    * [📷 Segment images](#-segment-images)
+* [🧠 Deep Learning Baselines](#-deep-learning-baselines)
+* [🐍 Python Users](#-python-users)
 
 
 ## 📂 Repository Layout
 
-...
+```text
+coastal-segmentation/
+├── .gitignore                              # Excluded files and directories
+├── README.md                               # Installation, data setup, CLI, and Python API reference
+├── requirements.txt                        # Python dependencies
+│
+├── assets/                                 # Annotation metadata, masks, and model settings
+│   ├── optimized_RF_params.json            # All tuned Random Forest hyperparameters
+│   ├── RF_params_0NN.json                  # Optimal Random Forest params for single pixel features
+│   ├── RF_params_8NN.json                  # Optimal Random Forest params for 8-neighbor features
+│   ├── RF_params_24NN.json                 # Optimal Random Forest params for 24-neighbor features
+│   └── annotations/
+│       ├── FRF_Duck/                       # Duck dataset data
+│       │   ├── class_priors.png            # Visualization of the Duck spatial class priors
+│       │   ├── classes.txt                 # Original Duck class names
+│       │   ├── small_classes.txt           # Four-class remapping names
+│       │   ├── small_classes_config.json   # Ordered classes and palette for the remapped labels
+│       │   ├── train_config_resunet.json   # Published ResUNet training configuration
+│       │   ├── train_image_files.txt       # Selected image filenames for RF-based training
+│       │   ├── train_metadata.csv          # Image-level metadata for the Duck training set
+│       │   └── train_metadata_code.py      # Metadata-generation and file selection code
+│       └── PHCO/                           # Pehuen Co rectified-image annotations
+│           ├── classes_config.json         # Ordered PHCO classes and visualization palette
+│           ├── points_rectify_split.csv    # Point labels, rectified coordinates, and data splits
+│           └── roi_rectify_mask.png        # Valid-pixel ROI for rectified PHCO imagery
+│
+├── results/
+│   ├── datasets/                           # Generated point samples dataset
+│   │   └── ...                       
+│   └── models/                             # Trained model artifacts
+│       └── ...                       
+│
+└── src/                                    # All source code, CLI commands, and notebooks
+  ├── processors.py                         # Random-Forest-based pipeline 
+  ├── utils.py                              # General function helpers
+  ├── handlers/                             # Module-based CLI commands
+  │   ├── create_priors.py                  
+  │   ├── prepare_duck_assets.py            
+  │   ├── segment_images.py               
+  │   └── train_processor.py              
+  └── notebooks/                            # Colab-oriented deep-learning baseline workflows
+    ├── ResUnet_workflow.ipynb          
+    ├── SAM_workflow.ipynb              
+    └── Unet_workflow.ipynb             
+```
+
+Downloaded Duck images, extracted labels, trained models, predictions, and local experiment files are intentionally not versioned. Use the [Duck setup command](#-duck-data-retrieval) to populate the required image assets.
+
 
 ## ⬇️ Installation
 
@@ -302,11 +349,126 @@ python -m src.handlers.segment_images \
 
 The reference workflows for SAM and dense supervised Unet models are notebooks developed for a [Google Colab](https://colab.research.google.com/) T4 GPU and may also run locally with a compatible CUDA/TensorFlow or PyTorch installation. Use the downloaded ResUNet directory described in [Duck Data Retrival](#-duck-data-retrieval) when loading the published TensorFlow model.
 
-* [Unet](src/notebooks/Unet_workflow.ipynb): fully supervised dense-pixel segmentation experiments with Unet architecture.
+### Notebooks
 
-* [ResUNet](src/notebooks/ResUNet_workflow.ipynb): fully supervised dense-pixel segmentation experiments with pre-trained ResUNet architecture.
+#### [U-Net](src/notebooks/Unet_workflow.ipynb)
 
-* [SAM](src/notebooks/SAM_workflow.ipynb): iterative multi-class point prompting, image-embedding caching, and foreground/background logit maps.
+This is the fully supervised Duck baseline. It pairs JPEG images with matching `*_label.png` masks, remaps the original six labels to four classes (`background`, `sand`, `vegetation`, `lag`), and trains a 512 x 512 U-Net with sparse categorical cross-entropy. The notebook uses a training-validation split, image resizing, GPU mixed precision, checkpointing, early stopping, and learning-rate reduction.
+
+The core construction and single-image inference flow are:
+
+```python
+import tensorflow as tf
+from pathlib import Path
+
+# TODO: Include the CustomMacroF1 class definition (implemented in the notebook)
+
+# Model checkpoint path
+MODEL_CHECKPOINT_FILE = "results/models/FRF_Duck_Unet.keras" 
+
+# Image file to segment
+image_file = Path("assets/annotations/FRF_Duck/test_c1/images/FRF_c1_snap_20161107160000_EBG.jpg")
+
+# Load the model
+model = tf.keras.models.load_model(
+    filepath=MODEL_CHECKPOINT_FILE,
+    custom_objects={"CustomMacroF1": CustomMacroF1}
+)
+
+# Make inference on a single image
+results = process_and_segment(image_file, model)
+
+# 2-D integer array of shape (height, width)
+pred_mask = results["labels"]
+```
+
+* Check the ``CustomMacroF1`` class in the ``✨ Definitions`` section of the notebook for the custom metric used during training.
+
+* The `process_and_segment` function restores predictions to the source resolution and produces labels and palette visualizations. 
+
+* The `results` dictionary contains the original image (`image`), predicted mask (`labels`), colorized labels (`color_labels`), low-resolution image (`low_image`) and low-resolution mask (`low_labels`).
+
+* Training section saves a Keras model, history, TensorBoard logs, and NPZ/PNG prediction artifacts. The notebook is arranged for Google Colab and benefits substantially from a GPU.
+
+
+#### [ResUNet](src/notebooks/ResUnet_workflow.ipynb)
+
+This notebook evaluates the published pretrained Duck ResUNet rather than training an architecture from scratch. It loads the extracted model with a custom `ResnetCustomMacroF1` metric, standardizes each image, uses four-class one-hot masks, and evaluates 512 x 512 batches.
+
+```python
+import tf_keras
+from pathlib import Path
+
+# TODO: Include the ResnetCustomMacroF1 class definition (implemented in the notebook)
+
+# Model checkpoint path
+model_path = "results/models/FRF_mar15_remap_fullmodel_model"
+
+# Test image and mask files
+data_path = Path("assets/annotations/FRF_Duck/test_c1")
+image_file = data_path / "images/FRF_c1_snap_20161107160000_EBG.jpg"
+mask_file = image_file.with_name(image_file.stem + "_label.png")
+
+
+# Preprocess input image
+image, one_hot_mask = resnet_process_file(image_file, mask_file)
+
+# Load the pretrained model
+model = tf_keras.models.load_model(
+  model_path,
+  custom_objects={"ResnetCustomMacroF1": ResnetCustomMacroF1},
+)
+
+# Predict class probabilities
+# Float array of shape (1, height, width, n_classes)
+pred_proba = model.predict(numpy.expand_dims(image, axis=0))
+
+# Predicted class labels
+# 2-D integer array of shape (height, width)
+pred_mask = numpy.argmax(pred_proba.squeeze(), axis=-1)
+```
+
+* See the ``ResnetCustomMacroF1`` class in the ``✨ Definitions`` section of the notebook for the custom metric used.
+
+* It reports confusion matrices plus per-class precision, recall, F1, and Jaccard/IoU metrics, exporting split-level JSON reports. Download and extract the published ResUNet weights with the [Duck setup command](#-duck-data-retrieval) before running it.
+
+
+#### [SAM](src/notebooks/SAM_workflow.ipynb)
+
+This is a point-prompted, multi-class SAM workflow for rectified PHCO images. It installs Meta's Segment Anything package, downloads the ViT-H checkpoint, caches each image embedding, subsamples labeled points by class, and can include background points as negative prompts. Annotation tables must provide image name, rectified x/y coordinates, class name, and optionally a split. The ROI mask removes predictions outside valid rectified pixels.
+
+```python
+# Initialize the SAM predictor
+sam_predictor = initialize_sam(
+  model_type="vit_h", 
+  checkpoint_path=".../sam_vit_h_4b8939.pth", 
+  device="cuda"
+)
+
+# Create the SAM pipeline wrapper
+model = SparsePointsSamPredictor(
+  predictor=sam_predictor, 
+  device="cuda"
+)
+
+# Set the input image and prompt points
+model.set_input(
+  image,          # Image array as (height, width, 3)
+  input_points,   # Integer array of (x, y) points as (n_points, 2)
+  target_labels,  # Integer array of class labels as (n_points, )
+  sorted_classes  # Index-sorted class names, matching the target labels values
+)
+
+# Run inference with optional background prompts
+results = model.make_inference(use_background_prompts=True)
+
+# 2-D integer array of shape (height, width)
+pred_mask = results["labels"]
+```
+
+* The ``results`` contain a per-class logit map (`logits`) and a 2-D label image (`labels`). 
+
+* The notebook also writes palette PNGs and prompt-selection diagnostics. ViT-H is GPU-oriented, and limiting prompts to roughly 11,000 per image avoids excessive VRAM use.
 
 
 ## 🐍 Python Users
