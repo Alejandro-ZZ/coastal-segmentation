@@ -103,6 +103,8 @@ TensorFlow should load the extracted model from `results/models/FRF_mar15_remap_
 
 The Bayesian refinement method requires same-size, aligned integer label masks. For FRF Duck, `--duck-labels` applies the project’s label resizing and six-to-four class remapping before computing a $(H, W, C)$ prior tensor.
 
+> **NOTE:** The below multi-line command is for Linux/macOS. For Windows users, break the command into multiple lines with `^` instead of `\` at the end of each line.
+
 ```bash
 python -m src.handlers.create_priors \
   --labels assets/annotations/FRF_Duck/train/labels \
@@ -298,7 +300,14 @@ python -m src.handlers.segment_images \
 
 ## 🧠 Deep Learning Baselines
 
-...
+The reference workflows for SAM and dense supervised Unet models are notebooks developed for a [Google Colab](https://colab.research.google.com/) T4 GPU and may also run locally with a compatible CUDA/TensorFlow or PyTorch installation. Use the downloaded ResUNet directory described in [Duck Data Retrival](#-duck-data-retrieval) when loading the published TensorFlow model.
+
+* [Unet](src/notebooks/Unet_workflow.ipynb): fully supervised dense-pixel segmentation experiments with Unet architecture.
+
+* [ResUNet](src/notebooks/ResUNet_workflow.ipynb): fully supervised dense-pixel segmentation experiments with pre-trained ResUNet architecture.
+
+* [SAM](src/notebooks/SAM_workflow.ipynb): iterative multi-class point prompting, image-embedding caching, and foreground/background logit maps.
+
 
 ## 🐍 Python Users
 

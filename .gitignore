@@ -8,3 +8,10 @@ __pycache__/
 assets/**/*.jpg
 assets/**/*.png
 assets/**/*.tif
+
+# Temporary/cached directories starting with an underscore
+**/_*/
+
+# Heavy processing results and datasets
+results/predictions/
+results/datasets/
