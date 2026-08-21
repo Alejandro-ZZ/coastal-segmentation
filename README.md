@@ -535,6 +535,7 @@ processor.postprocessing.set_majority_filter_size(
 ```python
 import pandas
 from pathlib import Path
+from pprint import pprint
 
 # Images path
 img_path = Path("assets/annotations/FRF_Duck/train/images")
@@ -553,7 +554,7 @@ pprint(train_results)
 print("\n")
 
 # Save the trained processor to a file
-processor.save("path/to/save/processor.pkl")
+processor.to_pkl("path/to/save/processor.pkl")
 
 # Get the complete metadata of the trained processor
 metadata = processor.get_metadata()
@@ -562,7 +563,7 @@ pprint(metadata)
 
 ### Evaluate
 
-* If you have a validation/test subset, you can evaluate the processor after training using `do_train=False` and passing the validation/test dataset to `evaluate_classifier`.
+* If you have a point-based validation/test subset, you can evaluate the processor after training using `evaluate_classifier` method with `do_train=False`.
 
 ```python
 eval_results = processor.evaluate_classifier(
@@ -593,15 +594,22 @@ Evaluation results is a dictionary containing the following keys:
 
 ```python
 import skimage
+import joblib
+
+# Load the trained processor from a PKL file
+# Make sure to use the same Python and scikit-learn versions used during training
+processor = joblib.load("path/to/save/processor.pkl")
 
 # Input image
 img_file = "assets/annotations/FRF_Duck/test_c1/images/FRF_c1_snap_20161107160000_EBG.jpg"
 img = skimage.io.imread(img_file)
 
 # Segment the image with optional refinement
-results = processor.segment_image(
-    rgb_image=img, 
-    refine="crf"
+results = processor.predict_image(
+    rgb_image=img,    # RGB image array as (height, width, 3)
+    refine="crf",     # Optional with values: "bayes", "crf"
+    class_priors=None # Array as (height, width, n_classes). Required if `refine="bayes"`
+    roi_mask=None     # Optional array mask as (height, width). Only nonzero pixels are segmented.
 )
 ```
 

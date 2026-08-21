@@ -1322,9 +1322,9 @@ class SegmentationProcessor:
     def predict_image(
         self,
         rgb_image: numpy.ndarray,
-        roi_mask: Optional[numpy.ndarray] = None,
-        class_priors: Optional[numpy.ndarray] = None,
         refine: Optional[str] = None,
+        class_priors: Optional[numpy.ndarray] = None,
+        roi_mask: Optional[numpy.ndarray] = None,
         save_file: Optional[Path] = None
     ) -> dict:
         """
@@ -1335,6 +1335,17 @@ class SegmentationProcessor:
         rgb_image : numpy.ndarray
             Input RGB image of shape `(height, width, 3)` and `uint8` data type.
 
+        refine : str, optional
+            Predicted probabilities refinement method to apply. If `None` (default), no refinement
+            is applied. Supported methods:
+
+            * ``"bayes"``: Bayesian refinement using the provided `class_priors`.
+            * ``"crf"``: Dense CRF refinement using the input RGB image for pairwise potentials.
+
+        class_priors : numpy.ndarray, optional
+            Spatial prior probabilities of shape `(height, width, n_classes)`.
+            Required if `refine="bayes"`.
+
         roi_mask : numpy.ndarray, optional
             Boolean mask of shape `(height, width)`. Only `True` pixels are classified.
             For pixels outside the valid region (`False` pixels), output results behave
@@ -1343,17 +1354,6 @@ class SegmentationProcessor:
             * labels: receive the postprocessing ignore index value.
             * color_labels: receive the postprocessing background color.
             * probabilities: receive a uniform distribution over classes (1 / n_classes).
-
-        class_priors : numpy.ndarray, optional
-            Spatial prior probabilities of shape `(height, width, n_classes)`.
-            Required if `refine="bayes"`.
-
-        refine : str, optional
-            Predicted probabilities refinement method to apply. If `None` (default), no refinement
-            is applied. Supported methods:
-
-            * ``"bayes"``: Bayesian refinement using the provided `class_priors`.
-            * ``"crf"``: Dense CRF refinement using the input RGB image for pairwise potentials.
 
         save_file : Path, optional
             If provided, saves the predicted results as a compressed NPZ file at the specified path.
