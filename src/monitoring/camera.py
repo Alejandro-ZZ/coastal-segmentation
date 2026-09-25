@@ -59,8 +59,9 @@ class CameraGeometry:
         self._calib_meta: Dict[str, Any] = {}
 
         # Planar image-to-world data
-        self._homography_mtx: Optional[NDArray] = None
-        self._rectify_mask: Optional[NDArray] = None
+        self._homography_mtx: NDArray = numpy.array([])
+        self._rectify_mask: NDArray = numpy.array([])
+        self._homography_meta: Dict[str, Any] = {}
 
     def is_calibrated(self) -> bool:
         """Return True if the camera has been calibrated with chessboard images."""
@@ -71,7 +72,14 @@ class CameraGeometry:
         return {
             "camera_matrix": self._camera_mtx,
             "distortion_coefficients": self._dist_coeffs,
-            "calibration_metadata": self._calib_meta
+            **self._calib_meta
+        }
+
+    def homography_params(self) -> Dict[str, Any]:
+        """Return the homography matrix and metadata."""
+        return {
+            "homography_matrix": self._homography_mtx,
+            **self._homography_meta
         }
 
     def _find_chessboard_corners(
@@ -347,7 +355,7 @@ class CameraGeometry:
             world_coordinates: numpy.ndarray,
             z: float = 0,
             compute_error: bool = False
-    ) -> Tuple[numpy.ndarray, Dict[str, float]]:
+    ) -> Dict[str, Any]:
         """
         Computes the homography matrix for rectifying an image plane (z)
         based on ground control points (GCP's).
@@ -372,16 +380,20 @@ class CameraGeometry:
 
         Returns
         -------
-        tuple
-            -   ``numpy.ndarray``: 3x3 homography matrix.
-
-            -   ``Dict[str, float]``: Re-projection errors in pixels ("mean_pixel_error") and
-                meters ("mean_meter_error"). None values are returned if `compute_error` is False.
+        dict
+            Dictionary containing the homography matrix and metadata:
+            -   ``homography_matrix`` (numpy.ndarray): 3x3 homography matrix
+            -   ``z_plane`` (float): Z-coordinate of the projection plane
+            -   ``mean_pixel_error`` (float): mean re-projection pixel error. -1.0 if compute_error is False.
+            -   ``mean_meter_error`` (float): mean re-projection error in meters. -1.0 if compute_error is False.
         """
         logger.debug("[Start] compute_homography")
+        
         # Check if the camera has been calibrated
         if not self.is_calibrated():
             raise RuntimeError("Camera has not been calibrated. Cannot compute homography.")
+        if len(image_coordinates) < 4:
+            raise ValueError("At least 4 image coordinates are required to compute homography.")
 
         image_coordinates = numpy.asarray(image_coordinates).astype(numpy.float32)  # column/x, row/y
         world_coordinates = numpy.asarray(world_coordinates).astype(numpy.float32)  # X, Y, Z
@@ -410,6 +422,9 @@ class CameraGeometry:
         homography = numpy.linalg.inv(numpy.dot(self._camera_mtx, rotation_matrix))
         homography = homography / homography[-1, -1]
 
+        # Populate attributes
+        self._homography_mtx = homography
+
         # Compute re-projection erros
         if compute_error:
             # Compute error in pixels
@@ -428,8 +443,8 @@ class CameraGeometry:
             mean_pixel_error = numpy.sqrt(tot_error / total_points)
 
             # Compute error in meters
-            image_coordinates_undistorted = undistort_points(image_coordinates, camera_matrix, distortion_coefficients)
-            reprojected_world_points = rectify_points(image_coordinates_undistorted, homography)
+            image_coordinates_undistorted = self.undistort_points(image_coordinates)
+            reprojected_world_points = self.rectify_points(image_coordinates_undistorted)
             meter_errors = numpy.linalg.norm(reprojected_world_points - world_coordinates[:, :2], axis=1)
             mean_meter_error = numpy.mean(meter_errors)
             best_error_ids = numpy.argsort(meter_errors)
@@ -438,18 +453,101 @@ class CameraGeometry:
             mean_pixel_error = round(float(mean_pixel_error), 4)
             mean_meter_error = round(float(mean_meter_error), 4)
         else:
-            mean_pixel_error = None
-            mean_meter_error = None
+            mean_pixel_error = -1.0
+            mean_meter_error = -1.0
 
-        # Output errors
-        mean_errors = {
+        # Populate attributes
+        self._homography_meta = {
+            "z_plane": z,
             "mean_pixel_error": mean_pixel_error,
-            "mean_meter_error": mean_meter_error
+            "mean_meter_error": mean_meter_error,
+            "num_points": len(world_coordinates)
         }
 
         logger.debug("[Finish] compute_homography")
-        return homography, mean_errors
+        return self.homography_params()
 
+    def undistort_points(self, image_coordinates: NDArray) -> NDArray:
+        """
+        Undistort image coordinates based on camera parameters.
+
+        Parameters
+        ----------
+        image_coordinates : numpy.ndarray
+            2D array of shape Nx2 containing image coordinates in pixels of GCPs.
+            Coordinates are expected to be as: (column/x, row/y).
+
+        Returns
+        -------
+        points : numpy.ndarray
+            Undistorted points array of same shape that input `image_coordinates`.
+        """
+        logger.debug("[Start] undistort_points")
+        
+        # Check if the camera has been calibrated
+        if not self.is_calibrated():
+            raise RuntimeError("Camera has not been calibrated. Cannot undistort points.")
+
+        # Convert pixel coordinates to a proper shape for OpenCV
+        reshaped_coordinates = image_coordinates.reshape(-1, 1, 2).astype(numpy.float32)  # Shape (N, 1, 2)
+
+        # Normalized camera coordinates (unit-less values in the camera-centric system)
+        # Each point is represented as: (x', y'). The origin is at the optical center and
+        # coordinates ate in metric space (not pixels)
+        undistorted_norm = cv2.undistortPoints( # Shape: (N, 1, 2)
+            src=reshaped_coordinates,
+            cameraMatrix=self._camera_mtx,
+            distCoeffs=self._dist_coeffs
+        )
+
+        # Convert normalized coordinates back to pixel coordinates
+        # Takes 2d points from inhomogeneous (x', y') form and converts them to homogeneous (x, y, 1) form
+        # Applying [:, 0, :2], only the (x', y') values are extracted, discarding the redundant third coordinate (w=1)
+        undistorted_coordinates = cv2.convertPointsToHomogeneous(undistorted_norm)[:, 0, :2]
+
+        # `camera_matrix[:2, :2]` extracts the slice of matrix that contains [ [fx, 0], [0, fx] ]
+        # `camera_matrix[:2, 2]` extracts the slice of matrix that contains [ [cx], [cy] ]
+        undistorted_coordinates = (undistorted_coordinates @ self._camera_mtx[:2, :2].T) + self._camera_mtx[:2, 2]
+
+        logger.debug("[Finish] undistort_points")
+        return undistorted_coordinates
+
+    def rectify_points(self, image_coordinates: NDArray) -> NDArray:
+        """
+        Transforms pixel coordinates (image space) into real-world XY coordinates
+        based on homography matrix.
+
+        Parameters
+        ----------
+        image_coordinates : numpy.ndarray
+            Nx2 array of pixel coordinates (column, row) to be transformed.
+
+        Returns
+        -------
+        world_coordinates : numpy.ndarray
+            Nx2 array of transformed world coordinates (X, Y).
+        """
+        logger.debug("[Start] rectify_points")
+
+        # Check if the homography matrix is set
+        if self._homography_mtx.size == 0:
+            raise RuntimeError("Homography matrix is not set. Cannot rectify points.")
+
+        # Check the homography is a 3x3 array
+        if self._homography_mtx.ndim != 2 or self._homography_mtx.shape != (3, 3):
+            raise ValueError(f"The homography matrix must be a 3x3 array. Got: {self._homography_mtx.tolist()}")
+
+        # Convert pixel points to the required shape (1, N, 2)
+        pixel_points = numpy.array([image_coordinates], dtype=numpy.float32)  # Shape (1, N, 2)
+
+        # Apply homography transformation and get the result from shape (1, N, 2) to (N, 2)
+        transformed_points = cv2.perspectiveTransform(
+            src=pixel_points,
+            m=self._homography_mtx
+        )[0]  # Extract (N, 2)
+
+        logger.debug("[Finish] rectify_points")
+        return transformed_points
 
 
 
