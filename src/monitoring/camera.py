@@ -54,13 +54,17 @@ class CameraGeometry:
     """
     def __init__(self):
         # Lens calibration parameters
-        self._camera_mtx: Optional[NDArray] = None
-        self._dist_coeffs: Optional[NDArray] = None
+        self._camera_mtx: NDArray = numpy.array([])
+        self._dist_coeffs: NDArray = numpy.array([])
         self._calib_meta: Dict[str, Any] = {}
 
         # Planar image-to-world data
         self._homography_mtx: Optional[NDArray] = None
         self._rectify_mask: Optional[NDArray] = None
+
+    def is_calibrated(self) -> bool:
+        """Return True if the camera has been calibrated with chessboard images."""
+        return (self._camera_mtx.size > 0) and (self._dist_coeffs.size > 0)
 
     def calibration_params(self) -> Dict[str, Any]:
         """Return the camera calibration parameters and metadata."""
@@ -70,13 +74,139 @@ class CameraGeometry:
             "calibration_metadata": self._calib_meta
         }
 
-    def calibrate_from_chessboard(
+    def _find_chessboard_corners(
+            self, 
+            image: NDArray, 
+            pattern_size: tuple, 
+            refine: bool, 
+            drawn_file: Optional[Path] = None
+        ) -> Optional[NDArray]:
+        """
+        Find the corners of a chessboard in the given image.
+
+        Parameters
+        ----------
+        image : NDArray
+            The input image in which to find the chessboard corners.
+        
+        pattern_size : tuple
+            The number of internal corners per a chessboard row and column (points_per_row, points_per_colum).
+        
+        refine : bool
+            If True, refine the corner locations using `cv2.cornerSubPix()`.
+        
+        drawn_file : Path, optional
+            If provided, the image with the detected corners will be saved to this file.
+        
+        Returns
+        -------
+        NDArray | None
+            The detected corners as a numpy array of shape (N, 1, 2) if found, otherwise None.
+        """
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Find the chessboard corners
+        find_success, corners = cv2.findChessboardCorners(image_gray, pattern_size, corners=None)
+        if find_success:
+            # Refine detection if required
+            if refine:
+                # `winSize` is the half-size of the search window for corner refinement. The window size is
+                #       `2*winSize+1`, and is centered on each corner to perform the refinement.
+                # `zeroZone` defines a region around the center of the search window where the gradient (or intensity)
+                #       is ignored. `zeroZone=(-1, -1)` means no region is ignored. This is usually enough and
+                #       recommended in most cases.
+                corners = cv2.cornerSubPix(
+                    image=image_gray,
+                    corners=corners,
+                    winSize=(11, 11),
+                    zeroZone=(-1, -1),
+                    criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                )
+
+            # If required, draw detected corners and save it
+            if drawn_file is not None:
+                cv2.drawChessboardCorners(image, pattern_size, corners, patternWasFound=find_success)
+                cv2.imwrite(drawn_file.as_posix(), image)
+        else:
+            corners = None
+    
+        return corners
+
+    def _calibrate_camera(
+            self, 
+            obj_points: List[NDArray], 
+            img_points: List[NDArray], 
+            image_width: int,
+            image_height: int, 
+            compute_error: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Calibrates the camera using the provided object and image points.
+
+        Parameters
+        ----------
+        obj_points : List[NDArray]
+            List of object points in the world coordinate system.
+
+        img_points : List[NDArray]
+            List of corresponding image points in the image coordinate system.
+        
+        image_width, image_height : int
+            The width and height of the images.
+        
+        compute_error : bool, optional
+            If True, compute the re-projection error to estimate how exact the found parameters are.
+
+        Returns
+        -------
+        Dict[str, Any]
+            A dictionary containing the calibration success, camera matrix, distortion coefficients, 
+            and mean pixel error.
+        """
+        #         mtx --> camera intrinsic matrix (3x3)
+        # dist_coeffs --> distortion coefficients (1xN)
+        #      r_vecs --> rotation vectors (1x3) for each image
+        #       t_ves --> translation vectors (1x3) for each image
+        calib_success, mtx, dist_coeffs, r_vecs, t_vecs = cv2.calibrateCamera(
+            objectPoints=obj_points,
+            imagePoints=img_points,
+            imageSize=(image_width, image_height),
+            cameraMatrix=numpy.array([]),   # None
+            distCoeffs=numpy.array([]),     # None
+        )
+
+        # Compute the re-projection error
+        mean_error = None
+        if compute_error:
+            mean_error = 0
+            for idx in range(len(obj_points)):
+                # Re-project 3d points in real world space to 2d points in the image plane
+                img_points2, _ = cv2.projectPoints(
+                    objectPoints=obj_points[idx],
+                    rvec=r_vecs[idx],
+                    tvec=t_vecs[idx],
+                    cameraMatrix=mtx,
+                    distCoeffs=dist_coeffs
+                )
+                error = cv2.norm(src1=img_points[idx], src2=img_points2, normType=cv2.NORM_L2) / len(img_points2)
+                mean_error += error
+            mean_error = round(mean_error / len(obj_points), 3)
+
+        # Output camera parameters
+        return {
+            "success": calib_success,
+            "camera_matrix": mtx,
+            "distortion_coefficients": dist_coeffs,
+            "mean_pixel_error": mean_error
+        }
+
+    def calibrate_from_chessboards(
         self,
         filepaths: List[Path],
         pattern_size: Tuple[int, int],
         compute_error: bool = True,
-        draw_corners: bool = False,
         refine_corners: bool = True,
+        output_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """
         Finds the camera intrinsic and extrinsic parameters from several views of a calibration
@@ -98,156 +228,82 @@ class CameraGeometry:
             If True, compute the re-projection error to estimate how exact the found parameters are. The closer the
             re-projection error is to zero, the more accurate the found parameters are.
 
-        draw_corners : bool, optional
-            If True, draw found corners and save it in a 'drawn_corners' directory in the same path of the first 
-            chessboard file. The output filename is the same of the processed file name with the "_corners" suffix.
-
         refine_corners : bool, optional
-            If True, refines the found corner locations using `cv2.cornerSubPix()`. Default is True.
+            If True (default), refines the found corner locations using `cv2.cornerSubPix()`.
+        
+        output_path : Optional[Path], optional
+            If provided, save the chessboard images with overlaid found corners in the specified path.
+            Output files will be named as: <input_file_name>_corners.<input_file_extension> 
 
         Returns
         -------
         Dict[str, Any]
             Dictionary with the camera intrinsic and extrinsic parameters:
 
-            - ``camera_matrix`` (numpy.ndarray): 3x3 floating-point camera intrinsic matrix.
-            - ``distortion_coefficients`` (numpy.ndarray): vector coefficients of 4, 5, 8, 12 or 14 elements.
+            -   ``camera_matrix`` (numpy.ndarray): 3x3 floating-point camera intrinsic matrix.
+            
+            -   ``distortion_coefficients`` (numpy.ndarray): 2D floating-point array of shape (1, N)
+                where 'N' can be 4, 5, 8, 12 or 14 elements.
+            
             - ``mean_pixel_error`` (float): mean re-projection pixel error. None If compute_error is False.
+
 
             If no corners were found to any chessboard file, return an empty dictionary.
         """
         logger.debug("[Start] calibrate_from_chessboard")
         if len(filepaths) == 0:
             raise ValueError("Empty chessboard pattern files.")
+        if len(filepaths) < 4:
+            logger.warning(
+                f"Calibration may be inaccurate. Few chessboard files provided: {len(filepaths)}. "
+                f"At least 4 files are recommended."
+            )
         logger.debug(f"Calibrating with {len(filepaths)} chessboard pattern files")
 
-        # Output calibration parameters
-        camera_parameters: Dict[str, Any] = {}
-
-        # Output image files config
-        drawn_corners_path: Path = Path()
-        if draw_corners:
-            # Input file properties
-            chessboard_file = filepaths[0]
-            pattern_dirname = chessboard_file.parent
-
-            # Output directory for drawn corner images
-            drawn_corners_path = pattern_dirname / "drawn_corners"
-            drawn_corners_path.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Drawn corners saved at: '{drawn_corners_path.as_posix()}'")
+        # Prepare output directory for drawn corners
+        if output_path is not None:
+            output_path.mkdir(parents=True, exist_ok=True)
 
         # Chessboard pattern size
         points_per_row, points_per_colum = pattern_size
 
         # Prepare object points, like: (0,0,0), (1,0,0), (2,0,0) ...,(6,5,0)
+        # The third dimension is always 0 for a planar pattern.
         objp = numpy.zeros((points_per_row * points_per_colum, 3), numpy.float32)
         objp[:, :2] = numpy.mgrid[0:points_per_colum, 0:points_per_row].T.reshape(-1, 2)
 
         # Lists to store object points and image points from all the images
-        obj_points: List[numpy.ndarray] = []  # 3d point in real world space
-        img_points: List[numpy.ndarray] = []  # 2d points in image plane
+        obj_points: List[NDArray] = []  # 3d point in real world space
+        img_points: List[NDArray] = []  # 2d points in image plane
 
         # Get the chessboard image shape from the first file
-        image_shape = cv2.imread(filepaths[0].as_posix()).shape[:2]
+        image_shape = cv2.imread(filepaths[0].as_posix()).shape
 
         # Process each chessboard pattern image
-        for chessboard_file in filepaths:
+        for filepath in filepaths:
             # Read reference image as BGR and gray
-            image: NDArray = cv2.imread(chessboard_file.as_posix())
-            image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            image: NDArray = cv2.imread(filepath.as_posix())
 
-            # Check all chessboard images have the same shape
-            if image_shape != image_gray.shape:
+            # Warn about different image sizes. All patterns should be the same size.
+            if image_shape != image.shape:
                 logger.warning(
-                    f"Chessboard image with different shape for '{chessboard_file.name}'. "
-                    f"Expected: {image_shape}. Got: {image_gray.shape} "
+                    f"Different chessboard image sizes. Expected: {image_shape}."
+                    f"Got: {image.shape}. File: '{filepath.name}'."
                 )
 
-            # Finde the chessboard corners
-            find_success, corners = cv2.findChessboardCorners(
-                image=image_gray,
-                patternSize=(points_per_colum, points_per_row),
-                corners=None
-            )
-
-            # If any corner, save it
-            if find_success:
-                # Refine detection if required
-                if refine_corners:
-                    # `winSize` is the half-size of the search window for corner refinement. The window size is
-                    #       `2*winSize+1`, and is centered on each corner to perform the refinement.
-                    # `zeroZone` defines a region around the center of the search window where the gradient (or intensity)
-                    #       is ignored. `zeroZone=(-1, -1)` means no region is ignored. This is usually enough and
-                    #       recommended in most cases.
-                    corners = cv2.cornerSubPix(
-                        image=image_gray,
-                        corners=corners,
-                        winSize=(11, 11),
-                        zeroZone=(-1, -1),
-                        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-                    )
-
-                # Add the object and image points
+            # Output file path to save drawn corners
+            output_file = None
+            if output_path is not None:
+                output_file = output_path / f"{filepath.stem}_corners{filepath.suffix}"
+            
+            # Find the chessboard corners
+            corners = self._find_chessboard_corners(image, pattern_size, refine_corners, output_file)
+            if corners is not None:
                 obj_points.append(objp)
                 img_points.append(corners)
-
-                # If required, draw the found corners
-                if draw_corners:
-                    # Draw detected corners and save it
-                    cv2.drawChessboardCorners(
-                        image=image,
-                        patternSize=(points_per_colum, points_per_row),
-                        corners=corners,
-                        patternWasFound=find_success
-                    )
-                    output_filepath = drawn_corners_path / f"{chessboard_file.stem}_corners{chessboard_file.suffix}"
-                    cv2.imwrite(output_filepath.as_posix(), image)
             else:
-                logger.warning(f"No corners found for file: '{chessboard_file.name}'")
+                logger.warning(f"No corners found. File: '{filepath.name}'")
 
-        # Both lists must have the same number of elements
-        assert len(obj_points) == len(img_points), "`obj_points` and `img_points` have different number of elements"
-
-        # No corners found for all chessboard files. Output is an empty dict
-        if len(obj_points) == 0 and len(img_points) == 0:
-            logger.error("No corners were found for any input chessboard image file")
-
-        # If any corner were detected, process them
-        else:
-            find_success, camera_matrix, dist_coeffs, rotation_vectors, translation_vectors = cv2.calibrateCamera(
-                objectPoints=obj_points,
-                imagePoints=img_points,
-                imageSize=image_shape[::-1],
-                cameraMatrix=None,
-                distCoeffs=None
-            )
-
-            # Compute the re-projection error
-            if compute_error:
-                mean_error = 0
-                for idx in range(len(obj_points)):
-                    # Re-project 3d points in real world space to 2d points in the image plane
-                    img_points2, _ = cv2.projectPoints(
-                        objectPoints=obj_points[idx],
-                        rvec=rotation_vectors[idx],
-                        tvec=translation_vectors[idx],
-                        cameraMatrix=camera_matrix,
-                        distCoeffs=dist_coeffs
-                    )
-                    error = cv2.norm(src1=img_points[idx], src2=img_points2, normType=cv2.NORM_L2) / len(img_points2)
-                    mean_error += error
-                mean_error = round(mean_error / len(obj_points), 3)
-            else:
-                mean_error = None
-
-            # Output camera parameters
-            camera_parameters = {
-                "camera_matrix": camera_matrix,
-                "distortion_coefficients": dist_coeffs,
-                "mean_pixel_error": mean_error
-            }
-
-        # Muestra cuantas imágenes fallaron al encontrar las esquinas
         # Display a summary of fail to detect corners
         if len(obj_points) != len(filepaths) and len(img_points) != len(filepaths):
             logger.warning(
@@ -255,14 +311,32 @@ class CameraGeometry:
                 f"Total files: {len(filepaths)}"
             )
 
-        # Populate attributes
-        self._camera_mtx = camera_parameters.get("camera_matrix", None)
-        self._dist_coeffs = camera_parameters.get("distortion_coefficients", None)
-        self._calib_meta = {
-            "mean_pixel_error": camera_parameters.get("mean_pixel_error", None),
-            "method": "chessboard",
-            "pattern_size": pattern_size,
-        }
+        # Output camera parameters 
+        calib_params: Dict[str, Any] = {}
+        if len(obj_points) == 0 and len(img_points) == 0:
+            # No corners found for all chessboard files
+            logger.error("No corners were found for any input chessboard file")
+        else:
+            # If any corner were detected, process them
+            calib_params = self._calibrate_camera(
+                obj_points=obj_points,
+                img_points=img_points,
+                image_width=image_shape[1],
+                image_height=image_shape[0],
+                compute_error=compute_error
+            )
+
+            # Populate attributes
+            if calib_params.get("success", False):
+                self._camera_mtx = calib_params["camera_matrix"]
+                self._dist_coeffs = calib_params["distortion_coefficients"]
+                self._calib_meta = {
+                    "mean_pixel_error": calib_params["mean_pixel_error"],
+                    "method": "chessboard",
+                    "pattern_size": pattern_size,
+                }
+            else:
+                logger.error("Camera calibration failed.")
 
         logger.debug("[Finish] calibrate_from_chessboard")
         return self.calibration_params()
@@ -271,8 +345,6 @@ class CameraGeometry:
             self,
             image_coordinates: numpy.ndarray,
             world_coordinates: numpy.ndarray,
-            camera_matrix: numpy.ndarray,
-            distortion_coefficients: numpy.ndarray = numpy.zeros((1, 4)),
             z: float = 0,
             compute_error: bool = False
     ) -> Tuple[numpy.ndarray, Dict[str, float]]:
@@ -289,13 +361,6 @@ class CameraGeometry:
         world_coordinates : numpy.ndarray
             2D array of shape (N, 3) containing real-world GCP's in meters.
             Coordinate points are expected to be as: (X, Y, Z).
-
-        camera_matrix : numpy.ndarray
-            Camera intrinsic matrix. 2D floating-point array of shape (3, 3).
-
-        distortion_coefficients : numpy.ndarray
-            Camera distortion coefficients. 2D floating-point array of shape (1, N)
-            where 'N' can be 4, 5, 8, 12 or 14 elements.
 
         z : float
             The Z-coordinate (elevation) in the real-world coordinate system of the
@@ -314,19 +379,21 @@ class CameraGeometry:
                 meters ("mean_meter_error"). None values are returned if `compute_error` is False.
         """
         logger.debug("[Start] compute_homography")
+        # Check if the camera has been calibrated
+        if not self.is_calibrated():
+            raise RuntimeError("Camera has not been calibrated. Cannot compute homography.")
 
         image_coordinates = numpy.asarray(image_coordinates).astype(numpy.float32)  # column/x, row/y
         world_coordinates = numpy.asarray(world_coordinates).astype(numpy.float32)  # X, Y, Z
-        camera_matrix = numpy.asarray(camera_matrix).astype(numpy.float32)
 
         # Estimate the camera pose
-        # rotation_vector --> shape: (3, 1)
+        #    rotation_vector --> shape: (3, 1)
         # translation_vector --> shape: (3, 1)
         success, rotation_vector, translation_vector = cv2.solvePnP(
             objectPoints=world_coordinates, # 3D points (X, Y, Z)
             imagePoints=image_coordinates,  # 2D projections (column, row)
-            cameraMatrix=camera_matrix,
-            distCoeffs=distortion_coefficients
+            cameraMatrix=self._camera_mtx,
+            distCoeffs=self._dist_coeffs
         )
 
         # Convert a rotation vector (Rodrigues representation) to a rotation matrix
@@ -340,7 +407,7 @@ class CameraGeometry:
         rotation_matrix[:, 2] = rotation_matrix[:, 2] + translation_vector.flatten()
 
         # Compute homography and normalize it
-        homography = numpy.linalg.inv(numpy.dot(camera_matrix, rotation_matrix))
+        homography = numpy.linalg.inv(numpy.dot(self._camera_mtx, rotation_matrix))
         homography = homography / homography[-1, -1]
 
         # Compute re-projection erros
@@ -353,8 +420,8 @@ class CameraGeometry:
                     objectPoints=world_coordinates[i],
                     rvec=rotation_vector,
                     tvec=translation_vector,
-                    cameraMatrix=camera_matrix,
-                    distCoeffs=distortion_coefficients
+                    cameraMatrix=self._camera_mtx,
+                    distCoeffs=self._dist_coeffs
                 )
                 tot_error += numpy.sum(numpy.abs(image_coordinates[i] - reprojected_image_points)**2)
                 total_points += i
