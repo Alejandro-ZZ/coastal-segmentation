@@ -11,7 +11,8 @@ from typing import (
     Dict,
     List,
     Optional,
-    Tuple
+    Tuple,
+    Union
 )
 
 
@@ -22,38 +23,117 @@ class CameraGeometry:
     """
     Stores the geometric properties of a camera:
     
-    1. Lens calibration parameters for a camera at one native image size.
-    2. Planar image-to-world mapping and output-grid settings for one camera.
+    1. Calibration parameters for a camera at one native image size.
+    2. Rectification parameters for transforming the image to a rectified view.
+
+    Parameters
+    ----------
+    bbox : Optional[tuple], optional
+        Bounding box for the rectified image. Tuple of (X_min, Y_min, Width, Height). 
+        Where `X_min` and `Y_min` are the minimum world coordinates, and `Width` and 
+        `Height` are the dimensions of the rectified image in world units (e.g., meters).
+        
+        If None (default), try to use the full image.
+    
+    resolution : float, optional
+        Pixel size for the rectified output grid in world units (e.g., meters). Default is 1.0.
     """
-    def __init__(self):
-        # Lens calibration parameters
+    def __init__(self, bbox: Optional[tuple] = None, resolution: float = 1.0):
+        if bbox is None:
+            logger.warning("Currently computing issues are expected when no bounding box is provided.")
+        
+        # Calibration parameters
         self._camera_mtx: NDArray = numpy.array([])
         self._dist_coeffs: NDArray = numpy.array([])
         self._calib_meta: Dict[str, Any] = {}
 
-        # Planar image-to-world data
+        # Rectification parameters
+        self._bounding_box: Optional[tuple] = bbox
+        self._xy_resolution: tuple = (resolution, resolution)
         self._homography_mtx: NDArray = numpy.array([])
-        self._rectify_mask: NDArray = numpy.array([])
         self._homography_meta: Dict[str, Any] = {}
 
+
+    # CAMERA PARAMETERS
+    # -----------------------------
+    def calibration_params(self, serialize: bool = False) -> Dict[str, Any]:
+        """
+        Camera calibration parameters and metadata.
+        
+        Parameters
+        ----------
+        serialize : bool, optional
+            If True, returns the parameters in a serializable format (e.g., lists instead of numpy arrays).
+            Default is False.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing:
+
+            -   ``matrix``: Intrinsic matrix. 2D-FloatArray of shape (3, 3).
+            -   ``coefficients``: Distortion coefficients. 2D-FloatArray of shape (1, N) | N = {4, 5, 8, 12, 14}.
+            -   ``metadata``: Additional calibration metadata.
+        """
+        if serialize:
+            return {
+                "matrix": self._camera_mtx.tolist(),
+                "coefficients": self._dist_coeffs.tolist(),
+                "metadata": self._calib_meta
+            }
+        else:
+            return {
+                "matrix": self._camera_mtx,
+                "coefficients": self._dist_coeffs,
+                "metadata": self._calib_meta
+            }
+
+    def rectification_params(self, serialize: bool = False) -> Dict[str, Any]:
+        """
+        Camera rectification parameters and metadata.
+
+        Parameters
+        ----------
+        serialize : bool, optional
+            If True, returns the parameters in a serializable format (e.g., lists instead of numpy arrays).
+            Default is False.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing:
+
+            -   ``homography``: Homography matrix to transform pixel to world coordinates. 2D-FloatArray of shape (3, 3).
+            
+            -   ``bbox``: Bounding box for the rectified image. Tuple of (X_min, Y_min, Width, Height). 
+                Where `X_min` and `Y_min` are the minimum world coordinates, and `Width` and `Height` are the dimensions 
+                of the rectified image in world units (e.g., meters).
+            
+            -   ``resolution``: Pixel size for the rectified output grid in world units (e.g., meters).
+            
+            -   ``metadata``: Additional rectification metadata.
+        """
+        if serialize:
+            return {
+                "homography": self._homography_mtx.tolist(),
+                "bbox": self._bounding_box,
+                "resolution": self._xy_resolution,
+                **self._homography_meta
+            }
+        else:
+            return {
+                "homography": self._homography_mtx,
+                "bbox": self._bounding_box,
+                "resolution": self._xy_resolution,
+                **self._homography_meta
+        }
+
+
+    # CAMERA CALIBRATION
+    # -----------------------------
     def is_calibrated(self) -> bool:
         """Return True if the camera has been calibrated with chessboard images."""
         return (self._camera_mtx.size > 0) and (self._dist_coeffs.size > 0)
-
-    def calibration_params(self) -> Dict[str, Any]:
-        """Return the camera calibration parameters and metadata."""
-        return {
-            "camera_matrix": self._camera_mtx,
-            "distortion_coefficients": self._dist_coeffs,
-            **self._calib_meta
-        }
-
-    def homography_params(self) -> Dict[str, Any]:
-        """Return the homography matrix and metadata."""
-        return {
-            "homography_matrix": self._homography_mtx,
-            **self._homography_meta
-        }
 
     def _find_chessboard_corners(
             self, 
@@ -440,6 +520,9 @@ class CameraGeometry:
         logger.debug("[Finish] compute_homography")
         return self.homography_params()
 
+
+    # GEOMETRIC TRANSFORMATION
+    # -----------------------------
     def undistort_points(self, image_coordinates: NDArray) -> NDArray:
         """
         Undistort image coordinates based on camera parameters.
@@ -562,7 +645,7 @@ class CameraGeometry:
 
         # Check if the camera has been calibrated
         if not self.is_calibrated():
-            raise RuntimeError("Camera has not been calibrated. Cannot undistort image.")
+            raise RuntimeError("Camera has not been calibrated.")
 
         # Image size
         height, width = image.shape[:2]
@@ -651,8 +734,6 @@ class CameraGeometry:
     def rectify_image(
             self,
             image: NDArray,
-            bounding_box: Optional[tuple] = None,
-            xy_resolution: Tuple[float, float] = (1.0, 1.0),
             method: str = "nearest",
             output_nodata_value: int = 1,
             mask: Optional[NDArray] = None,
@@ -672,21 +753,6 @@ class CameraGeometry:
         image : numpy.ndarray
             Input image array, expected shape (height, width) or (height, width, channels).
             Image must be undistorted if homography matrix was computed based on camera intrinsic/extrinsic properties.
-
-        bounding_box : tuple, optional
-            Bounding box specifying a region of interest (ROI) in a projected coordinate system.
-            Values are expected as follows:
-                bbox = (
-                    X_min,  # left boundary
-                    Y_min,  # bottom boundary
-                    Width,  # X direction width
-                    Height  # Y direction height
-                )
-            If None, uses full image. Defaults to None.
-
-        xy_resolution : Tuple[float, float], optional
-            Resolution (pixel size) for the rectified output grid in world units (e.g., meters).
-            Format: (X_resolution, Y_resolution). Defaults to (1.0, 1.0).
 
         method : str, optional
             Interpolation method for `scipy.interpolate.griddata` ('nearest', 'linear', 'cubic').
@@ -726,7 +792,7 @@ class CameraGeometry:
 
         # Check if the homography matrix is set
         if self._homography_mtx.size == 0:
-            raise RuntimeError("Homography matrix is not set. Cannot rectify image.")
+            raise RuntimeError("Homography matrix is not computed.")
 
         # Input image is expected to be undistorted
         image_undistorted = image
@@ -754,12 +820,12 @@ class CameraGeometry:
         masked_undistorted_image = image_undistorted.copy()
 
         # Resolution for interpolation grid in meters in X and Y directions
-        x_resolution = float(xy_resolution[0])
-        y_resolution = float(xy_resolution[1])
+        x_resolution = float(self._xy_resolution[0])
+        y_resolution = float(self._xy_resolution[1])
 
         # If no bounding box is provided, use the entire image as the region
         # !! Currently there are some memory leak issues. Use bbox instead !!
-        if bounding_box is None:
+        if self._bounding_box is None:
             logger.warning("No bounding box provided. Processing the entire image with adaptive grid size")
             error_msg = "Currently not supported. Use a defined bounding box"
             logger.error(error_msg)
@@ -780,13 +846,20 @@ class CameraGeometry:
 
         # Process using a bounding box
         else:
-            logger.debug(f"Processing only values within bounding box: {bounding_box}")
+            # Compute the bounding box coordinates
+            x_min, y_min, bbox_width, bbox_height = self._bounding_box
+            x_max = x_min + bbox_width
+            y_max = y_min + bbox_height
+            logger.debug(f"(Xmin={x_min}, Ymin={y_min}, Width={bbox_width}, Height={bbox_height})")
 
             # Create a rectangle representing the bounding box for point filtering
             bounding_box_rect = mpatches.Rectangle(
-                (bounding_box[0], bounding_box[1]), # Bottom-left corner (X min, Y min)
-                bounding_box[2], bounding_box[3],   # Width & Height
-                linewidth=2, edgecolor='r', facecolor='none'
+                xy=(x_min, y_min),
+                width=bbox_width, 
+                height=bbox_height,
+                linewidth=2, 
+                edgecolor="r", 
+                facecolor="none"
             )
 
             # Get the total number of coordinate points and which ones fall inside the bounding box
@@ -808,10 +881,6 @@ class CameraGeometry:
 
             # Get the valid transformed coordinates inside the bounding box
             valid_points = transformed_coordinates[inside_indices, :]
-
-            # Compute the bounding box coordinates
-            x_min, x_max = bounding_box[0], bounding_box[0] + bounding_box[2]
-            y_min, y_max = bounding_box[1], bounding_box[1] + bounding_box[3]
 
         # Inform the size of grid to generate
         grid_size_x = int(numpy.ceil((x_max - x_min) / x_resolution))
@@ -844,7 +913,7 @@ class CameraGeometry:
             # Single channel values for 2D images (H, W)
             rgb_values = masked_undistorted_image.flatten()[inside_indices].reshape(-1, 1) # Shape (N, 1)
 
-        logger.debug("Interpolation process has started!")
+        logger.debug("Interpolation started...")
         interpolated_float = scipy.interpolate.griddata(
             points=valid_points,  # Known valid pixel coordinates
             values=rgb_values,    # Corresponding RGB values
@@ -899,3 +968,44 @@ class CameraGeometry:
 
         logger.debug("[Finish] rectify_image")
         return rectified_array #, interpolate_grid
+
+    def compute_rectification_mask(self, image: NDArray) -> NDArray:
+        """
+        Creates a mask for valid rectified pixels. 
+
+        Workflow:
+            1. Undistort the input image using the camera's intrinsic parameters.
+            2. Rectify the undistorted image using the homography matrix and specified bounding box and resolution.
+            3. Identify pixels in the rectified image that are valid (i.e., not NaN) and create a boolean mask.
+
+        The output is a boolean mask that identifies valid rectified pixels. A pixel is considered
+        valid if it is inside the convex hull of the input points (i.e., pixels whose values are not
+        NaN in the rectified result).
+
+        Parameters
+        ----------
+        image : numpy.ndarray
+            The input image to be processed. It is expected to be in a format supported
+            for the undistortion and rectification processes.
+
+        Returns
+        -------
+        NDArray
+            A 2D boolean mask indicating valid rectified pixels. Elements of the mask
+            are True for valid pixels and False for invalid ones.
+        """
+        # Undistort and rectify image
+        rectified_linear = self.rectify_image(
+            image=self.undistort_image(image),
+            method="linear",
+            return_float=True
+        )
+
+        # Invalid mask for grayscale image
+        invalid_mask = numpy.isnan(rectified_linear)
+
+        # Color image (RGB)
+        if rectified_linear.ndim != 2:
+            invalid_mask = invalid_mask.all(axis=2)
+
+        return numpy.logical_not(invalid_mask)
