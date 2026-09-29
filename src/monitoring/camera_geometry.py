@@ -75,18 +75,22 @@ class CameraGeometry:
             -   ``coefficients``: Distortion coefficients. 2D-FloatArray of shape (1, N) | N = {4, 5, 8, 12, 14}.
             -   ``metadata``: Additional calibration metadata.
         """
+        logger.debug("[Start] calibration_params")
+        params = {}
         if serialize:
-            return {
+            params = {
                 "matrix": self._camera_mtx.tolist(),
                 "coefficients": self._dist_coeffs.tolist(),
                 "metadata": self._calib_meta
             }
         else:
-            return {
+            params = {
                 "matrix": self._camera_mtx,
                 "coefficients": self._dist_coeffs,
                 "metadata": self._calib_meta
             }
+        logger.debug("[Finish] calibration_params")
+        return params
 
     def rectification_params(self, serialize: bool = False) -> Dict[str, Any]:
         """
@@ -113,20 +117,24 @@ class CameraGeometry:
             
             -   ``metadata``: Additional rectification metadata.
         """
+        logger.debug("[Start] rectification_params")
+        params = {}
         if serialize:
-            return {
+            params = {
                 "homography": self._homography_mtx.tolist(),
                 "bbox": self._bounding_box,
                 "resolution": self._xy_resolution,
                 **self._homography_meta
             }
         else:
-            return {
+            params = {
                 "homography": self._homography_mtx,
                 "bbox": self._bounding_box,
                 "resolution": self._xy_resolution,
                 **self._homography_meta
-        }
+            }
+        logger.debug("[Finish] rectification_params")
+        return params
 
 
     # CAMERA CALIBRATION
@@ -164,6 +172,7 @@ class CameraGeometry:
         NDArray | None
             The detected corners as a numpy array of shape (N, 1, 2) if found, otherwise None.
         """
+        logger.debug("[Start] _find_chessboard_corners")
         image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # Find the chessboard corners
@@ -190,7 +199,8 @@ class CameraGeometry:
                 cv2.imwrite(drawn_file.as_posix(), image)
         else:
             corners = None
-    
+
+        logger.debug("[Finish] _find_chessboard_corners")
         return corners
 
     def _calibrate_camera(
@@ -224,6 +234,7 @@ class CameraGeometry:
             A dictionary containing the calibration success, camera matrix, distortion coefficients, 
             and mean pixel error.
         """
+        logger.debug("[Start] _calibrate_camera")
         #         mtx --> camera intrinsic matrix (3x3)
         # dist_coeffs --> distortion coefficients (1xN)
         #      r_vecs --> rotation vectors (1x3) for each image
@@ -254,6 +265,7 @@ class CameraGeometry:
             mean_error = round(mean_error / len(obj_points), 3)
 
         # Output camera parameters
+        logger.debug("[Finish] _calibrate_camera")
         return {
             "success": calib_success,
             "camera_matrix": mtx,
@@ -311,7 +323,7 @@ class CameraGeometry:
 
             If no corners were found to any chessboard file, return an empty dictionary.
         """
-        logger.debug("[Start] calibrate_from_chessboard")
+        logger.debug("[Start] calibrate_from_chessboards")
         if len(filepaths) == 0:
             raise ValueError("Empty chessboard pattern files.")
         if len(filepaths) < 4:
@@ -399,7 +411,7 @@ class CameraGeometry:
             else:
                 logger.error("Camera calibration failed.")
 
-        logger.debug("[Finish] calibrate_from_chessboard")
+        logger.debug("[Finish] calibrate_from_chessboards")
         return self.calibration_params()
 
     def compute_homography(
@@ -434,8 +446,10 @@ class CameraGeometry:
         Returns
         -------
         dict
-            Dictionary containing the homography matrix and metadata:
-            -   ``homography_matrix`` (numpy.ndarray): 3x3 homography matrix
+            Dictionary containing the rectification parameters and metadata:
+            -   ``homography_matrix`` (numpy.ndarray): 3x3 homography matrix.
+            -   ``bounding_box`` (tuple): Bounding box for the rectified image. Tuple of (X_min, Y_min, Width, Height).
+            -   ``resolution`` (tuple): Pixel size for the rectified output grid in world units (e.g., meters).
             -   ``z_plane`` (float): Z-coordinate of the projection plane
             -   ``mean_pixel_error`` (float): mean re-projection pixel error. -1.0 if compute_error is False.
             -   ``mean_meter_error`` (float): mean re-projection error in meters. -1.0 if compute_error is False.
@@ -518,7 +532,7 @@ class CameraGeometry:
         }
 
         logger.debug("[Finish] compute_homography")
-        return self.homography_params()
+        return self.rectification_params()
 
 
     # GEOMETRIC TRANSFORMATION
@@ -699,7 +713,7 @@ class CameraGeometry:
             - 2D array of transformed x-coordinates (columns).
             - 2D array of transformed y-coordinates (rows).
         """
-        logger.debug("[Start] homography_perspective_transform")
+        logger.debug("[Start] _homography_perspective_transform")
 
         # Generate a grid of (columns, rows) pixel coordinates covering the entire image
         # get_pixel_coordinates(image)
@@ -728,7 +742,7 @@ class CameraGeometry:
         #     transformed_coordinates[:, 0].reshape(pixel_columns.shape[:2]),
         #     transformed_coordinates[:, 1].reshape(pixel_rows.shape[:2])
         # )
-        logger.debug("[Finish] homography_perspective_transform")
+        logger.debug("[Finish] _homography_perspective_transform")
         return transformed_x, transformed_y
 
     def rectify_image(
@@ -994,6 +1008,8 @@ class CameraGeometry:
             A 2D boolean mask indicating valid rectified pixels. Elements of the mask
             are True for valid pixels and False for invalid ones.
         """
+        logger.debug("[Start] compute_rectification_mask")
+
         # Undistort and rectify image
         rectified_linear = self.rectify_image(
             image=self.undistort_image(image),
@@ -1008,4 +1024,5 @@ class CameraGeometry:
         if rectified_linear.ndim != 2:
             invalid_mask = invalid_mask.all(axis=2)
 
+        logger.debug("[Finish] compute_rectification_mask")
         return numpy.logical_not(invalid_mask)
