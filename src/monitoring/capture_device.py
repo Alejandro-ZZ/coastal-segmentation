@@ -80,7 +80,6 @@ class CaptureDevice(abc.ABC):
         raise NotImplementedError()
 
 
-
 class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
     """
     Capture device implementation using OpenCV for video capture.
@@ -347,3 +346,44 @@ class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
 
         cv2.destroyAllWindows()
         logger.debug("[Finish] start_streaming")
+
+
+class RtspCameraDevice(OpenCvCaptureDevice):
+    """Capture device implementation for RTSP streams using OpenCV."""
+    def __init__(
+            self, 
+            rtsp_fmt: str, 
+            rtsp_params: Dict[str, Any],
+            fps: int = 30, 
+            fourcc: str = "DIVX"
+    ):
+        """
+        Parameters
+        ----------
+        rtsp_fmt : str
+            RTSP URL format string. Use placeholders for username, password, ip_address, and port, e.g.,
+            "rtsp://{username}:{password}@{ip_address}:{port}/stream".
+        
+        rtsp_params : Dict[str, Any]
+            Parameters for the RTSP URL format string. 
+            Common keys include: "username", "password", "ip_address", and "port" (e.g., 554).
+        
+        fps : int, optional
+            Framerate for video stream. Default is 30.
+        
+        fourcc : str, optional
+            Four-character code for the video codec. Default is "DIVX". List of codes can be 
+            obtained at page: https://fourcc.org/codecs.php.
+        """
+        # Check for expected placeholders in the RTSP format string
+        for placeholder in rtsp_params.keys():
+            if f"{{{placeholder}}}" not in rtsp_fmt:
+                raise ValueError(f"RTSP format string is missing placeholder for '{placeholder}'.")
+
+        # Construct the RTSP URL using the provided parameters
+        self.format = rtsp_fmt
+        self.params = rtsp_params
+        self.url = rtsp_fmt.format(**rtsp_params)
+        
+        # Initialize the base class with the constructed RTSP URL
+        super().__init__(filename=self.url, fps=fps, fourcc=fourcc)
