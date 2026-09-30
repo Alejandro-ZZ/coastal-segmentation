@@ -80,7 +80,7 @@ class CaptureDevice(abc.ABC):
         raise NotImplementedError()
 
 
-class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
+class OpenCvCaptureDevice(CaptureDevice):
     """
     Capture device implementation using OpenCV for video capture.
     
@@ -111,8 +111,8 @@ class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
         # Video file, image file sequence, capturing device id, or a URL for a video stream
         self.filename: Union[str, int] = filename
         
-        # Capturing object from OpenCV
-        self.cap: Optional[cv2.VideoCapture] = None
+        # Initialized as an empty capture object. Will be opened in connect().
+        self.cap: cv2.VideoCapture = cv2.VideoCapture()
 
         # Codec for video writing
         supported_fourcc = {code for codes in self._VIDEO_PROFILES.values() for code in codes}
@@ -125,13 +125,32 @@ class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
         # Framerate for video stream. Default is 30.
         self.fps: int = fps
     
-    # TODO: Complete implementation
     def get_health(self) -> Dict[str, Any]:
-        health_info = {
+        conection_info = {
             "filename": self.filename,
-            "is_ready": (self.cap is not None) and self.cap.isOpened()
+            "is_open": self.cap.isOpened(),
+            "frame_width": self.cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+            "frame_height": self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+            "backend": self.cap.get(cv2.CAP_PROP_BACKEND),
         }
-        return health_info
+
+        stream_info = {
+            "fps": self.cap.get(cv2.CAP_PROP_FPS),
+            "fourcc": self.cap.get(cv2.CAP_PROP_FOURCC),
+        }
+
+        device_info = {
+            "brightness": self.cap.get(cv2.CAP_PROP_BRIGHTNESS),
+            "contrast": self.cap.get(cv2.CAP_PROP_CONTRAST),
+            "saturation": self.cap.get(cv2.CAP_PROP_SATURATION),
+            "hue": self.cap.get(cv2.CAP_PROP_HUE),
+            "exposure": self.cap.get(cv2.CAP_PROP_EXPOSURE),       
+        }
+        return {
+            "connection": conection_info,
+            "stream": stream_info,
+            "device": device_info,
+        }
 
     def connect(self) -> bool:
         """Create an OpenCV stream object for frame capturing."""
@@ -158,9 +177,7 @@ class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
     def disconnect(self):
         """Release the OpenCV stream object and any associated resources."""
         logger.debug("[Start] disconnect")
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
+        self.cap.release()
         logger.debug("[Finish] disconnect")
 
     def capture_frame(self) -> NDArray:
@@ -169,14 +186,9 @@ class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
         # Dummy output array
         read_frame: NDArray = numpy.array([])
         
-        # Check if the capture device is ready
-        if self.cap is None:
-            raise RuntimeError("Capture device is not ready for capturing frames.")
-        
         # Connect to the capture device if it's not already connected
-        if not self.cap.isOpened():
-            if not self.connect():
-                raise RuntimeError("Failed to connect to the capture device.")
+        if not self.cap.isOpened() and not self.connect():
+            raise RuntimeError("Failed to connect to the capture device.")
         
         # Read a frame from the capture device
         read_success, read_frame = self.cap.read()
@@ -227,14 +239,9 @@ class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
         """
         logger.debug("[Start] capture_video")
         
-         # Check if the capture device is ready
-        if self.cap is None:
-            raise RuntimeError("Capture device is not ready for capturing frames.")
-
         # Connect to the capture device if it's not already connected
-        if not self.cap.isOpened():
-            if not self.connect():
-                raise RuntimeError("Failed to connect to the capture device.")
+        if not self.cap.isOpened() and not self.connect():
+            raise RuntimeError("Failed to connect to the capture device.")
 
         # Validate the output file path
         out_file = Path(out_file)
@@ -327,8 +334,8 @@ class OpenCvCaptureDevice(CaptureDevice, abc.ABC):
         The streaming will continue until the user presses the 'q' key to exit.
         """
         logger.debug("[Start] start_streaming")
-        if (self.cap is None) or (not self.cap.isOpened()):
-            raise RuntimeError("Capture device is not connected.")
+        if not self.cap.isOpened() and not self.connect():
+            raise RuntimeError("Failed to connect to the capture device.")
 
         # Start streaming video from the capture device and display it in a window
         while True:
