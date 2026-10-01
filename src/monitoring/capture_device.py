@@ -43,7 +43,10 @@ class CaptureDevice(abc.ABC):
 
     @abc.abstractmethod
     def capture_frame(self) -> NDArray:
-        """Capture one in-memory frame from the physical device."""
+        """
+        Capture one in-memory frame from the physical device. 
+        Array must be a RGB 3D numpy array of shape (height, width, channels)
+        """
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -216,6 +219,9 @@ class OpenCvCaptureDevice(CaptureDevice):
         # Log reading error
         if not read_success:
             logger.error("Failed to capture frame.")
+        else:
+            # Convert the frame from BGR to RGB format
+            read_frame = cv2.cvtColor(read_frame, cv2.COLOR_BGR2RGB)
 
         logger.debug("[Finish] capture_frame")
         return read_frame
