@@ -306,7 +306,8 @@ class CameraGeometry:
         
         output_path : Optional[Path], optional
             If provided, save the chessboard images with overlaid found corners in the specified path.
-            Output files will be named as: <input_file_name>_corners.<input_file_extension> 
+            Output files will be named as:: 
+                <input_file_name>_corners.<input_file_extension> 
 
         Returns
         -------

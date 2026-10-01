@@ -37,6 +37,11 @@ class CaptureDevice(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
+    def start_streaming(self):
+        """Start streaming video from the physical device displaying it in a window or GUI."""
+        raise NotImplementedError()
+
+    @abc.abstractmethod
     def capture_frame(self) -> NDArray:
         """Capture one in-memory frame from the physical device."""
         raise NotImplementedError()
@@ -72,11 +77,6 @@ class CaptureDevice(abc.ABC):
             A dictionary containing capture statistics or diagnostics, such as the number of frames 
             captured, number of failures, and total capture time.
         """
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def start_streaming(self):
-        """Start streaming video from the physical device displaying it in a window or GUI."""
         raise NotImplementedError()
 
 

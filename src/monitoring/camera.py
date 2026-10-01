@@ -28,26 +28,62 @@ class ImageSize:
     height: int
 
 
-@dataclass(frozen=True)
-class CameraProfile:
-    """Stable identity and non-secret metadata of a physical camera."""
-    camera_id: str
-    system_id: str
-    name: str
-    model: str
-    native_image_size: ImageSize
-    manufacturer: Optional[str] = None
-    serial_number: Optional[str] = None
-    installed_at: Optional[datetime] = None
-    is_active: bool = True
-    description: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class Camera:
+    """
+    Base class for hardware-specific sources of camera snapshots and recordings.
+    
+    Parameters
+    ----------
+    camera_id, system_id, name : str
+        Stable identifiers and human-readable name of the camera.
+    
+    image_size : ImageSize
+        Pixel dimensions of the camera's output images.
+    
+    geometry : CameraGeometry
+        Geometric properties of the camera, including intrinsic and extrinsic parameters.
+    
+    device : CaptureDevice
+        Hardware-specific capture device for acquiring images or video from the camera.
+    
+    info : dict, optional
+        Additional metadata about the camera, such as description, manufacturer, model, serial number, etc.
+    """
+    def __init__(
+            self, 
+            camera_id: str,
+            system_id: str,
+            name: str,
+            image_size: ImageSize,
+            geometry: CameraGeometry, 
+            device: CaptureDevice,
+            info: Optional[dict] = None, 
+    ):
+        # Profile information
+        self.camera_id = camera_id
+        self.system_id = system_id
+        self.name = name
+        self.image_size = image_size
+        self.info: Dict[str, Any] = info if info is not None else {}
 
-
-class Camera(abc.ABC):
-    """Base class for hardware-specific sources of camera snapshots and recordings."""
-    def __init__(self, profile: CameraProfile, geometry: CameraGeometry, device: CaptureDevice):
-        self.profile = profile
+        # Geometry and capturing device services
         self.geometry = geometry
         self.device = device
 
+        # State information
+        self.is_active: bool = False
+        self.installed_at: Optional[datetime] = None
+
+    def install(self, date: Optional[datetime] = None):
+        """Mark the camera as installed and active."""
+        if date is None:
+            date = datetime.now()
+        
+        self.is_active = True
+        self.installed_at = date
+        logger.info(f"Camera {self.name} ({self.camera_id}) installed at {self.installed_at}")
+
+    def uninstall(self):
+        """Mark the camera as uninstalled and inactive."""
+        self.is_active = False
+        logger.info(f"Camera {self.name} ({self.camera_id}) uninstalled")
