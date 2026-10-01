@@ -87,3 +87,38 @@ class Camera:
         """Mark the camera as uninstalled and inactive."""
         self.is_active = False
         logger.info(f"Camera {self.name} ({self.camera_id}) uninstalled")
+
+    def setup_device(self) -> bool:
+        """
+        Setup the camera's capture device, previous to start the monitoring process. 
+
+            1. Test the connection to the camera.
+            2. Check frame quality and resolution.
+            3. Release conection if the test is successful. 
+        
+        Returns
+        -------
+        bool
+            True if the setup was successful, False otherwise.
+        """
+        logger.debug("[Start] setup_device")
+
+        setup_success: bool = False
+
+        # Test the connection to the camera
+        if not self.device.connect():
+            logger.error(f"Failed to connect to camera device (id='{self.camera_id}')")
+        else:
+            # Capture frame and check the image dimensions, size and quality
+            frame_arr = self.device.capture_frame()
+            frame_ok = self._check_frame(frame_arr) # TODO
+            
+            # Update the setup success and disconnect the device
+            setup_success = frame_ok
+            self.device.disconnect()
+
+        logger.debug("[Finish] setup_device")
+        return setup_success
+
+
+    
