@@ -124,6 +124,26 @@ class OpenCvCaptureDevice(CaptureDevice):
 
         # Framerate for video stream. Default is 30.
         self.fps: int = fps
+
+    def set_filename(self, filename: Union[str, int]):
+        """
+        Update the filename or device ID for the capture device. The method will attempt to 
+        connect to the new capture device to validate the filename or device ID.
+
+        Parameters
+        ----------
+        filename : str | int
+            New video file, image file sequence, capturing device id, or a URL for a video stream.
+        """
+        # Update the filename or device ID for the capture device
+        self.filename = filename
+
+        # Attempt to connect to the new capture device to validate the filename or device ID
+        self.disconnect()
+        if not self.connect():
+            raise RuntimeError(f"Failed to connect to the new capture device filename: '{self.filename}'")
+        else:
+            self.disconnect()
     
     def get_health(self) -> Dict[str, Any]:
         conection_info = {
@@ -357,13 +377,7 @@ class OpenCvCaptureDevice(CaptureDevice):
 
 class RtspCameraDevice(OpenCvCaptureDevice):
     """Capture device implementation for RTSP streams using OpenCV."""
-    def __init__(
-            self, 
-            rtsp_fmt: str, 
-            rtsp_params: Dict[str, Any],
-            fps: int = 30, 
-            fourcc: str = "DIVX"
-    ):
+    def __init__(self, rtsp_fmt: str, rtsp_params: Dict[str, Any], fps: int = 30, fourcc: str = "DIVX"):
         """
         Parameters
         ----------
@@ -382,15 +396,49 @@ class RtspCameraDevice(OpenCvCaptureDevice):
             Four-character code for the video codec. Default is "DIVX". List of codes can be 
             obtained at page: https://fourcc.org/codecs.php.
         """
-        # Check for expected placeholders in the RTSP format string
-        for placeholder in rtsp_params.keys():
-            if f"{{{placeholder}}}" not in rtsp_fmt:
+        # Initialize the base class with a placeholder filename. 
+        # The actual RTSP URL will be set later.
+        super().__init__(filename=rtsp_fmt, fps=fps, fourcc=fourcc)
+
+        # Set connection URL format and parameters for RTSP stream
+        self._format = rtsp_fmt
+        self._params = rtsp_params
+
+        # Set the RTSP URL and update the filename in the base class
+        self._url: str = ""
+        self._set_url()
+        
+    def _set_url(self):
+        """Check for expected placeholders in the RTSP format string"""
+        for placeholder in self._params.keys():
+            if f"{{{placeholder}}}" not in self._format:
                 raise ValueError(f"RTSP format string is missing placeholder for '{placeholder}'.")
 
-        # Construct the RTSP URL using the provided parameters
-        self.format = rtsp_fmt
-        self.params = rtsp_params
-        self.url = rtsp_fmt.format(**rtsp_params)
+        # Set the RTSP URL using the provided parameters
+        self._url = self._format.format(**self._params)
+
+        # Update the filename in the base class to reflect the new RTSP URL
+        self.set_filename(self._url)
+
+    def set_conection(self, format: Optional[str] = None, params: Optional[dict] = None):
+        """
+        Update the RTSP connection URL.
+
+        Parameters
+        ----------
+        format : str, optional
+            New RTSP URL format string. 
+            If None (default), the existing format will be used.
         
-        # Initialize the base class with the constructed RTSP URL
-        super().__init__(filename=self.url, fps=fps, fourcc=fourcc)
+        params : dict, optional
+            New parameters for the RTSP URL format string. 
+            If None (default), the existing parameters will be used.
+        """
+        # Update the RTSP format and parameters
+        if format is not None:
+            self._format = format
+        if params is not None:
+            self._params = params
+
+        # Update the RTSP URL and filename
+        self._set_url()
