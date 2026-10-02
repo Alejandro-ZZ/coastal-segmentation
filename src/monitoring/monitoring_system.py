@@ -1,5 +1,7 @@
 import logging
 import skimage.io
+import time
+import threading
 
 from datetime import datetime
 from pathlib import Path
@@ -7,16 +9,19 @@ from numpy.typing import NDArray
 from typing import (
     Any,
     Dict,
+    List,
     Optional,
     Union
 )
 
 from src.monitoring.camera import Camera
+from src.utils import retry_process
 
 
 logger = logging.getLogger("MonitoringSystem")
 
 
+# TODO: Implement repository handling for saving recording data, snapshots, and metadata
 class MonitoringSystem:
     """
     Aggregate representing a site that owns one or more physical cameras.
@@ -37,14 +42,14 @@ class MonitoringSystem:
             id: str, 
             name: str, 
             location: str,
-            device: ProcessorDevice,
+            computer: ProcessorDevice,
             cameras: Optional[Dict[str, Camera]] = None,
             metadata: Optional[Dict[str, Any]] = None
     ):
         self.system_id = id
         self.name = name
         self.location = location
-        self.device = device
+        self.computer = computer
 
         self.is_active = True
         self.cameras: Dict[str, Camera] = cameras if cameras is not None else {}
@@ -104,94 +109,135 @@ class MonitoringSystem:
 
         return snapshots
 
-    def start_monitoring(self):
-        logger.debug("[Start] start_monitoring")
 
-        # Log the processor device health status
-        status_txt: str = self.device.get_health(as_txt=True)
-        logger.info(f"Pre-monitoring health status: {status_txt}")
+    # TODO: Implement 
+    def _get_recording_name(config_data: dict) -> str:
+        """
+        Get the recording sample name to save outputs. Note that this function also update the "serie" data from the
+        config_data["system"].
 
-        # Setup all cameras and check if the initialization was successful
-        # setup_success = _setup_all_cameras(monitoring_data)
+        Parameters
+        ----------
+        config_data : dict
+        Dictionary with all configuration data for the monitoring system.
+
+        Returns
+        -------
+        name : str
+            Formatted name to save the recording name. Example: 05110004_21_09_14_16_17
+        """
+        logger.debug("[Start] _get_recording_name")
+
+        # Obtiene la fecha y hora actual en el formato definido
+        datetime_fmt = config_data["system"]["datetime_fmt"]
+        datetime_str = datetime.now().strftime(datetime_fmt)
+
+        # Obtiene el número de serie actual y la cantidad de digits a formatear
+        serie = config_data["system"]["serie"]
+        n_digits = config_data["system"]["serie_digits"]
+
+        # Numero de serie formateado
+        serie_str = str(serie).zfill(n_digits)
+
+        # Actualiza el número de serie en la unidad
+        config_data["system"]["serie"] += 1
+
+        # Sobreescribe el archivo JSON con la información actualizada
+        save_json_file(settings.MONITORING_CONFIG_FPATH, config_data)
+        logger.info(f"Serie de monitoreo actualizada: {config_data['system']['serie']}")
+
+        # Obtiene el formato para las coordenadas geográficas
+        # coords_str = format_coordinates(
+        #     latitude=config_data["system"]["geo_coords"]["lat"], 
+        #     longitude=config_data["system"]["geo_coords"]["long"]
+        # )
+
+        logger.debug("[Finish] _get_recording_name")
+        return f"{serie_str}_{datetime_str}"  # _{coords_str}"
+
+    # TODO: Implement
+    def _record_and_save(self, recording_name: str):
+        # Configuración del monitoreo concurrente o paralelo
+        
+        # List concurrent or parallel tasks to be executed
+        parallel_tasks: List[threading.Thread] = []
+
+        # Create a recording and saving task for each camera in the monitoring system
+        for camera_id, camera in self.cameras.items():
+            # Prepare output file path for camera data (images or video) 
+            out_path = Path(...)
+            out_file = out_path / f"{recording_name}.{asset_extension}"
+            out_path.mkdir(parents=True, exist_ok=True)
+
+            # Connect the camera device
+            camera.device.connect()
+
+            # Creates the camera recording thread 
+            #   * Concurrent: threading.Thread(target, kwargs)
+            #   * Parallel: multiprocessing.Process(target, kwargs)
+            # Internally, the thread will call: self._target(*self._args, **self._kwargs)
+            parallel_tasks.append(threading.Thread(
+                target=camera.device.capture_video, 
+                kwargs=dict(duration=, out_file=out_file, frames=False, max_fails=3) # TODO
+            ))
+
+        # Start all concurrent or parallel tasks
+        t0 = time.perf_counter()
+        logger.info(f"Starting {len(parallel_tasks)} concurrent/parallel tasks")
+        logger.info(f"Device health status: {self.computer.get_health(as_txt=True)}")
+        for parallel_task in parallel_tasks:
+            parallel_task.start()
+
+        # Wait for all concurrent or parallel tasks to finish
+        for parallel_task in parallel_tasks:
+            parallel_task.join()
+
+        # Log the elapsed time and device health status
+        logger.info(f"Tasks finished. Elapsed time: {time.perf_counter() - t0:.2f} seconds")
+        logger.info(f"Device health status: {self.computer.get_health(as_txt=True)}")
+
+        # Disconnect all camera devices
         for camera in self.cameras.values():
-            if not camera.setup_device():
-                logger.error(f"Failed to setup camera '{camera.camera_id}'")
+            camera.device.disconnect() 
 
+    # TODO: Implement
+    def start_monitoring(self):
+        """
+        Main monitoring process that orchestrates the following steps:
 
-        # TODO: Continue migrating the below code to use the MonitoringSystem class and its cameras
-        # Reintenta en caso de no haber sido exitosa la inicialización
-        retry_count = 0
-        while (not setup_success) and (retry_count < settings.MONITORING_RETRY_MAX):
-            # Espera para reintentar y agrega el registro
-            retry_count += 1
-            time.sleep(settings.MONITORING_RETRY_TIME)
-            logger.warning(f"({retry_count} / {settings.MONITORING_RETRY_MAX}) Reintentando configuracion de camaras")
+            1. Check if all cameras are ready for monitoring, retrying if necessary.
+            2. Get the recording name based on the current configuration data.
+            3. Start recording and saving data from all cameras concurrently or in parallel.
+            4. Log the monitoring results and device health status.
+        
+        Generated media assets will be saved in ?? TODO
+        """
+        logger.debug("[Start] start_monitoring")
+        logger.info(f"Pre-monitoring health status: {self.computer.get_health(as_txt=True)}")
 
-            # Reintenta inicializar y actualizar los objetos <VideoCapture> para cada camara
-            setup_success = _setup_all_cameras(monitoring_data)
+        # TODO: We could let the monitoring process start with at least one camera ready
+        # Check if all cameras are ready for monitoring, retrying if necessary
+        cameras_ready = retry_process(
+            process=lambda: [ camera.is_ready() for camera in self.cameras.values() ],
+            success=lambda results: all(results),
+            max_retries=3,
+            retry_delay=30,
+            on_retry=lambda attempt, max_retires: logger.warning(f"Retrying camera setup. Attempt {attempt}/{max_retires}"),
+        )
 
-        # Finaliza el proceso si no fue exitosa la inicialización
-        if not setup_success:
-            logger.error("No se pudieron configurar todas las camaras. Fin de la tanda")
+        # Finish the monitoring process if cameras are not ready
+        if not cameras_ready:
+            logger.error("Could not set up cameras successfully. Aborting monitoring session.")
             return
 
-        # Obtiene el nombre para el proceso de monitoreo con base en la serie y fecha-hora actual
-        recording_name = _get_recording_name(config_data)
-        logger.info(f"Tanda de monitoreo: {recording_name}")
+        # Get the recording name based on the current configuration data
+        recording_name = self._get_recording_name()
+        logger.info(f"Monitoring session: {recording_name}")
 
-        # Configuración del monitoreo concurrente o paralelo
-        tasks = []
-        multi_cameras = len(monitoring_data) > 1
-        for camera_name, camera_data in monitoring_data.items():
-            # Nombre de la sub carpeta donde se guardarán los archivos
-            subdir_name = recording_name if camera_data["process_kwargs"]["process"] == "captures" else "video"
-
-            # Carpeta de salida para la camara
-            camera_dir = os.path.join(
-                # .../data/monitoring/captures/camara_izquierda | .../data/monitoring/results/camara_izquierda
-                camera_data["output_directory"],
-                # 20240611T183000 | "video"
-                subdir_name
-            )
-            camera_dir = str(os.path.normpath(camera_dir))
-            os.makedirs(camera_dir, exist_ok=True)
-
-            # Actualiza la ruta de archivo para guardar las imágenes o video
-            extension = camera_data["output_extension"]
-            filename = f"{recording_name}.{extension}"
-            filepath = os.path.join(camera_dir, filename)
-            camera_data["process_kwargs"]["output_fpath"] = filepath
-            # print("[DEBUG]", camera_data["process_kwargs"])
-
-            # Crea la tarea y la inicia
-            # Concurrente: threading.Thread(target, kwargs)
-            # Paralelo: multiprocessing.Process(target, kwargs)
-            # self._target(*self._args, **self._kwargs)
-            if multi_cameras:
-                task = threading.Thread(target=record_and_save, kwargs=camera_data["process_kwargs"])
-                tasks.append(task)
-            else:
-                record_and_save(**camera_data["process_kwargs"])
-
-        # Inicia las tareas concurrentes o paralelas y espera a que terminen
-        if multi_cameras:
-            logger.info("Inicio de multi-tareas: " + get_raspi_status())
-
-            # Inicia todas las tareas
-            for task in tasks:
-                task.start()
-
-            # Espera a que todas las tareas terminen
-            for task in tasks:
-                task.join()
-
-            logger.info("Fin de multi-tareas: " + get_raspi_status())
-
-        # Cierra el stream de video (<VideoCapture>) de todas las cámaras
-        _release_video_capture_objects(monitoring_data)
-
-        # Muestra recursos de la RasPi después de cerrar los streams
-        logger.info("Fin del monitoreo: " + get_raspi_status())
+        # Start recording and saving data
+        self._record_and_save(recording_name)
+        logger.info(f"Monitoring session finished: {self.computer.get_status(as_txt=True)}")
         logger.debug("[Finish] start_monitoring")
 
-        logger.debug("[Finish] start_monitoring")
+
+
