@@ -88,9 +88,12 @@ class Camera:
         self.is_active = False
         logger.info(f"Camera {self.name} ({self.camera_id}) uninstalled")
 
-    def setup_device(self) -> bool:
+    def is_ready(self) -> bool:
         """
-        Setup the camera's capture device, previous to start the monitoring process. 
+        Check if the camera is ready for monitoring.
+        
+        This method performs a series of checks to ensure the camera is properly 
+        set up and functioning correctly, previous to start the monitoring process: 
 
             1. Test the connection to the camera.
             2. Check frame quality and resolution.
