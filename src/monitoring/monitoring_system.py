@@ -423,7 +423,48 @@ class MonitoringSystem:
         
         logger.debug("[Finish] start_monitoring")
 
+    def process_session_assets(self, session_id: str):
+        """
+        Process the recorded assets from a monitoring session.
 
+        Parameters
+        ----------
+        session_id : str
+            The ID of the monitoring session to process.
+
+        This method is a placeholder for future implementation and may include steps such as:
+            - Video processing (e.g., stabilization, enhancement)
+            - Image analysis (e.g., object detection, segmentation)
+            - Data aggregation and reporting
+        """
+        logger.debug("[Start] process_session_assets")
+
+        # TODO: Test computer overheat to switch to Threads or to a lower performance mode 
+        # List of parallel tasks to be executed
+        parallel_tasks: List[multiprocessing.Process] = []
+
+        # Create a processing task for each camera in the monitoring system
+        for camera_id, camera in self.cameras.items():
+            # Process the recorded assets for only intended cameras (e.g., video cameras)
+            if camera_id in self.posprocessing_cameras: # TODO: This attribute is thought to be a Set[str] of camera IDs that are configured for post-processing
+                # Internally multiprocessing execute: self._target(*self._args, **self._kwargs)
+                task = multiprocessing.Process(
+                    target=_process_and_save_stats_from_images,
+                    args=(camera_name, camera_data, stats_config)
+                )
+                parallel_tasks.append(task)
+
+        # Start and wait for all concurrent or parallel tasks to finish
+        logger.info(f"Session posprocessing started with {len(parallel_tasks)} tasks")
+        self.computer.log_health(level="INFO")
+        t0 = time.perf_counter()
+        for task in parallel_tasks:
+            task.start()
+        for task in parallel_tasks:
+            task.join()
+        logger.info(f"Session posprocessing finished. Elapsed time: {time.perf_counter() - t0:.2f} seconds")
+        self.computer.log_health(level="INFO")
+        logger.debug("[Finish] process_session_assets")
 
 
 
