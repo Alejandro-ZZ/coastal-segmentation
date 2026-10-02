@@ -1,12 +1,17 @@
 import json
 import logging
+import time
 from pathlib import Path
-from typing import Dict
-from typing import List
-from typing import Literal
-from typing import Optional
-from typing import Sequence
-from typing import Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Union
+)
 
 import joblib
 import numpy
@@ -14,6 +19,79 @@ from sklearn.base import BaseEstimator
 
 
 logger = logging.getLogger("Utils")
+
+
+def retry_process(
+        process: Callable[[], Any], 
+        success: Callable[[Any], bool],
+        max_retries: int = 3,
+        retry_delay: float = 0,
+        on_retry: Optional[Callable[[int, int], None]] = None
+) -> bool:
+    """
+    Retry a process until it succeeds or the maximum number of retries is reached.
+
+    Parameters
+    ----------
+    process : Callable[[], Any]
+        A callable with no arguments that performs the process to be retried. 
+        It should return a result (including ``None``).
+
+    success : Callable[[Any], bool]
+        A callable that takes the result of `process` and returns True if the 
+        process was successful, False otherwise.
+
+    max_retries : int, optional
+        The maximum number of retries before giving up. Default is 3.
+
+    retry_delay : float, optional
+        The delay in seconds between retries. Default is 0 (no delay).
+
+    on_retry : Callable[[int, int], None], optional
+        An optional callable that is called before each retry attempt. It takes two arguments:
+        the current attempt number (starting from 1) and the total number of attempts (max_retries + 1).
+
+    Returns
+    -------
+    bool
+        True if the process succeeded within the allowed attempts, False otherwise.
+    """
+    logger.debug("[Start] retry_process")
+
+    # Final result of the process execution
+    process_success = False
+
+    # Execute the process for the first time without retrying
+    try:
+        result = process()
+        process_success = success(result)
+    except Exception as e:
+        logger.error(f"Failed to execute process. Exception: {e}")
+
+    # Attempt to retry the process if it failed
+    attempts = 0
+    while (not process_success) and (attempts < max_retries):
+        # Update the number of tries
+        attempts += 1
+
+        # Execute the `on_retry` callback
+        if on_retry is not None:
+            on_retry(attempts, max_retries)
+
+        # Delay before retrying
+        if retry_delay > 0:
+            time.sleep(retry_delay)
+            logger.warning(f"Retrying after {retry_delay} seconds...")
+
+        # Execute the process again
+        try:
+            result = process()
+            process_success = success(result)
+        except Exception as e:
+            logger.error(f"Failed to execute process. Attempt: {attempts}/{max_retries}. Exception: {e}")
+
+    logger.debug("[Finish] retry_process")
+    return process_success
 
 
 def load_json_file(json_fpath: Union[str, Path]) -> dict:
