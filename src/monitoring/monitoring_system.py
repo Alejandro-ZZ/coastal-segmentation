@@ -40,7 +40,7 @@ class SystemConfig():
         Whether the monitoring system is enabled or not. If False, 
         the system will not perform any monitoring tasks.
     
-    sampling_range : Tuple[str, str]
+    sampling_interval : Tuple[str, str]
         The start and end times for the monitoring system's sampling period. 
         This defines the time window during which the system is actively monitoring, 
         avoiding unnecessary resource usage outside of this period.
@@ -49,7 +49,7 @@ class SystemConfig():
             self, 
             dt_format: str, 
             reference_dt: str, 
-            sampling_range: Tuple[str, str],
+            sampling_interval: Tuple[str, str],
             is_enabled: bool = True, 
             delta_minutes: float = 30.0,
             min_disk_space: float = 0.1,  # Minimum disk space needed (in GB) for a monitoring session
@@ -58,14 +58,14 @@ class SystemConfig():
         self.dt_format: str = dt_format
         self._check_datetimes({
             "reference": reference_dt,
-            "minimum sampling range": sampling_range[0],
-            "maximum sampling range": sampling_range[1]
+            "minimum sampling range": sampling_interval[0],
+            "maximum sampling range": sampling_interval[1]
         })
 
         # Set the reference datetime and sampling range
         self.reference_dt: datetime = datetime.strptime(reference_dt, dt_format)
-        self.sampling_range: Tuple[datetime, datetime]
-        self.set_sampling_range(sampling_range)
+        self.sampling_interval: Tuple[datetime, datetime]
+        self.set_sampling_interval(sampling_interval)
 
         self.delta_minutes: float = delta_minutes
         self.is_enabled: bool = is_enabled
@@ -94,23 +94,31 @@ class SystemConfig():
         """Register a reboot event in the monitoring system's metadata."""
         self.reboots.append(datetime.now().strftime(self.dt_format))
 
-    def set_reference_datetime(self, reference_dt: str):
+    def set_reference_datetime(self, ref_dt: str):
         """Set the reference datetime for the monitoring system."""
-        self._check_datetimes({"reference": reference_dt})
-        self.reference_dt = datetime.strptime(reference_dt, self.dt_format)
+        self._check_datetimes({"reference": ref_dt})
+        self.reference_dt = datetime.strptime(ref_dt, self.dt_format)
 
-    def set_sampling_range(self, sampling_range: Tuple[str, str]):
-        """Set the sampling range for the monitoring system."""
+    def set_sampling_interval(self, interval: Tuple[str, str]):
+        """
+        Set the sampling range for the monitoring system.
+        
+        Parameters
+        ----------
+        interval : Tuple[str, str]
+            A tuple containing the minimum and maximum sampling date and times as strings 
+            in the format specified by `dt_format`.
+        """
         self._check_datetimes({
-            "minimum sampling range": sampling_range[0],
-            "maximum sampling range": sampling_range[1]
+            "minimum sampling range": interval[0],
+            "maximum sampling range": interval[1]
         })
-        self.sampling_range = (
-            datetime.strptime(sampling_range[0], self.dt_format),
-            datetime.strptime(sampling_range[1], self.dt_format)
+        self.sampling_interval = (
+            datetime.strptime(interval[0], self.dt_format),
+            datetime.strptime(interval[1], self.dt_format)
         )
-        if self.sampling_range[0] >= self.sampling_range[1]:
-            raise ValueError(f"Invalid sampling range: {sampling_range}. The minimum must be less than the maximum.")
+        if self.sampling_interval[0] >= self.sampling_interval[1]:
+            raise ValueError(f"Invalid sampling range: {interval}. The minimum must be less than the maximum.")
 
     def is_ready(self) -> bool:
         """
@@ -130,8 +138,8 @@ class SystemConfig():
             system_ready = False
 
         # Check if the current time is within the sampling range
-        elif not (self.sampling_range[0] <= current_time <= self.sampling_range[1]):
-            logger.warning(f"Current time '{current_time}' is outside the sampling range: {self.sampling_range}.")
+        elif not (self.sampling_interval[0] <= current_time <= self.sampling_interval[1]):
+            logger.warning(f"Current time '{current_time}' is outside the sampling range: {self.sampling_interval}.")
             system_ready = False
 
         return system_ready
@@ -172,7 +180,6 @@ class MonitoringSystem:
         self.computer = computer
         self.config = config
 
-        self.is_active = True
         self.cameras: Dict[str, Camera] = cameras if cameras is not None else {}
         
     def get_cameras(self) -> Dict[str, Camera]:
@@ -240,7 +247,6 @@ class MonitoringSystem:
                skimage.io.imsave(fname=out_file.as_posix(), arr=read_frame)
 
         return snapshots
-
 
     # TODO: Implement
     def ready_to_monitor(self) -> bool:
@@ -423,6 +429,7 @@ class MonitoringSystem:
         
         logger.debug("[Finish] start_monitoring")
 
+    # TODO: Implement
     def process_session_assets(self, session_id: str):
         """
         Process the recorded assets from a monitoring session.
