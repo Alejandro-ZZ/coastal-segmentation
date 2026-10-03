@@ -261,16 +261,16 @@ class MonitoringSystem:
         # ---------------------------------
         time_delta = self.config.delta_minutes * 60
         time_ref = self.config.reference_dt
-        time_ok_fnc = lambda _: abs((self.computer.current_datetime() - time_ref).total_seconds()) < time_delta
-        computer_time_ok = time_ok_fnc(None)
+        computer_time_ok = abs((self.computer.current_datetime() - time_ref).total_seconds()) < time_delta
         if not computer_time_ok:
-            # Retry setting the computer datetime
-            computer_time_ok = retry_process(
+            # Retry setting the computer datetime and check datetime consistency
+            retry_process(
                 process=lambda: self.computer.setup_datetime(),
-                success=time_ok_fnc,
-                max_retries=3,
-                retry_delay=5
+                success=lambda results: results,
+                max_retries=20,
+                retry_delay=10
             )
+            computer_time_ok = abs((self.computer.current_datetime() - time_ref).total_seconds()) < time_delta
         if not computer_time_ok:
             logger.error("Invalid computer datetime. Aborting monitoring session.")
             return False
@@ -296,7 +296,7 @@ class MonitoringSystem:
             success=lambda results: all(results),
             max_retries=3,
             retry_delay=30,
-            on_retry=lambda attempt, max_retires: logger.warning(f"Retrying camera setup ({attempt}/{max_retires})"),
+            on_retry=lambda attempt, max_retires: logger.warning(f"Retrying cameras setup ({attempt}/{max_retires})"),
         )
         if not cameras_ready:
             logger.error("Could not set up cameras successfully. Aborting monitoring session.")
@@ -305,7 +305,7 @@ class MonitoringSystem:
         return True
 
     # TODO: Implement 
-    def _get_session_id(config_data: dict) -> str:
+    def _get_session_id(self) -> str:
         """
         Get the session ID to save outputs. Note that this function also update the "serie" data from the
         config_data["system"].
