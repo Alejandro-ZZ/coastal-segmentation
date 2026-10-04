@@ -248,7 +248,6 @@ class MonitoringSystem:
 
         return snapshots
 
-    # TODO: Implement
     def ready_to_monitor(self) -> bool:
         # Available computer disk space
         # ---------------------------------
@@ -322,9 +321,8 @@ class MonitoringSystem:
         """
         logger.debug("[Start] _get_session_id")
 
-        # Obtiene la fecha y hora actual en el formato definido
-        datetime_fmt = config_data["system"]["datetime_fmt"]
-        datetime_str = datetime.now().strftime(datetime_fmt)
+        # Get date and time in the config defined format
+        datetime_str = self.computer.current_datetime().strftime(self.config.dt_format)
 
         # Obtiene el número de serie actual y la cantidad de digits a formatear
         serie = config_data["system"]["serie"]
@@ -472,6 +470,117 @@ class MonitoringSystem:
         logger.info(f"Session posprocessing finished. Elapsed time: {time.perf_counter() - t0:.2f} seconds")
         self.computer.log_health(level="INFO")
         logger.debug("[Finish] process_session_assets")
+
+    # TODO: Implement
+    def _process_and_save_stats_from_images(self, camera_name: str, camera_data: dict, stats_config: dict) -> None:
+        """
+        Process statistics from previously saved images.
+
+        Parameters
+        ----------
+        camera_name : str
+            Name of the camera to be processed.
+
+        camera_data : dict
+            Camera data with the following keys:
+                * "connection_url": (str) the RTSP url for video stream.
+
+                * "output_directory": (str) directory path to save recording process output.
+
+                * "output_extension": (str) file extension of the recording process output. Example: "jpg"
+
+                * "process_kwargs": (dict) keyword arguments for the recording process function `record_and_save()`.
+                    Undefined arguments are set to None because they are supposed to be updated in the monitoring loop.
+
+        stats_config : dict
+            Configuration data for the statistics processing. Must have the following keys:
+                * "directory" (str): Path to the directory where resulting statistic images are saved.
+
+                * "extension" (str): File extension for the processed statistic images.
+
+                * "names" (list): Statistic names to compute. Valid names are the ones supported by
+                    `src.online_stats.OnlineImageStats` class.
+
+                * "fixed_width" (list): Pixel indices to crop images width-wise before processing. Values are as:
+                    [min_pixel, max_pixel] and `max_pixel` is non-inclusive.
+
+                * "fixed_height" (list): Pixel indices to crop images height-wise before processing. Values are as:
+                    [min_pixel, max_pixel] and `max_pixel` is non-inclusive.
+        """
+        logger.debug("[Start] _process_and_save_stats_from_images")
+
+        # Ruta y nombre de archivo de la tanda de captura
+        # .../base_root/data/monitoring/captures/{camera_name}/20240611T183000/frame-0001_20240611T183000.jpg
+        capture_fpath = camera_data["process_kwargs"]["output_fpath"]
+
+        # `capture_fpath` puede ser None si en la ejecución de `start_monitoring` falló la configuración de alguna cámara
+        if capture_fpath is not None:
+            # Ruta de la carpeta temporal con los archivos capturados
+            # .../base_root/data/monitoring/captures/{camera_name}/20240611T183000
+            captures_dir = os.path.dirname(capture_fpath)
+
+            # Procesamiento de las estadísticas para cada imagen capturada
+            logger.info(f"( {camera_name} ) Procesando estadisticas...")
+            start_time = time.time()
+            computed_stats = compute_stats_from_images(
+                images_dir=captures_dir,
+                images_ext=camera_data["output_extension"],
+                stats_names=stats_config["names"],
+                fixed_width=stats_config["fixed_width"],
+                fixed_height=stats_config["fixed_height"],
+                use_rgb=False  # Devuelve los resultados en formato BGR
+            )
+            executing_time = time.time() - start_time
+            logger.info(
+                f"( {camera_name} ) Tiempo de ejecucion: {int(executing_time // 60)} minutos "
+                f"{executing_time % 60:.1f} segundos"
+            )
+
+            # Verifica que el procesamiento fue exitoso y guardas las estadísticas como imagen
+            if len(computed_stats) > 0:
+                logger.info(f"( {camera_name} ) Guardando estadisticas...")
+                # Carpeta para guardar los resultados
+                output_dir = str(os.path.join(
+                    settings.BASE_PATH,
+                    os.path.normpath(stats_config["directory"]),
+                    camera_name
+                ))
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Extension para los archivos de salida
+                output_ext = stats_config["extension"]
+
+                # Itera cada estadística procesada y la guarda
+                for stat_name, stat_arr in computed_stats.items():
+                    logger.info(f"( {camera_name} ) Guardando {stat_name}")
+                    stat_arr = normalize_array(
+                        arr=stat_arr,
+                        lower_percentile=1,
+                        upper_percentile=99,
+                        replace_nan=0.0
+                    )
+                    os.makedirs(os.path.join(output_dir, stat_name), exist_ok=True)
+
+                    # Guarda la imagen de la estadística
+                    capture_name, capture_ext = os.path.splitext(os.path.basename(capture_fpath))
+                    stat_image_filename = f"{capture_name}_{stat_name}.{output_ext}"
+                    cv2.imwrite(
+                        os.path.join(output_dir, stat_name, stat_image_filename),
+                        stat_arr.astype(numpy.uint8)
+                    )
+            else:
+                logger.error(f"( {camera_name} ) No se pudieron procesar las imagenes (`computed_stats` vacio)")
+
+            # Borra todos los archivos en la carpeta temporal
+            # .../data/monitoring/captures/{camera_name}/20240611T183000
+            logger.info(f"( {camera_name} ) Borrando archivos y carpetas...")
+            remove_files_in_directory(captures_dir)
+
+            # Borra todas las carpetas vacías (inclusive) de la ruta de captura de la camara
+            # .../data/monitoring/captures/camara_izquierda
+            remove_empty_folders(camera_data["output_directory"])
+        else:
+            logger.warning(f"( {camera_name} ) Camara no configurada. Procesamiento de estadisticas omitido")
 
 
 
