@@ -2,6 +2,7 @@ import logging
 import pynmea2
 import pytz
 import serial
+import socket
 import subprocess
 
 from datetime import datetime
@@ -30,7 +31,51 @@ class ComputeDevice:
     def __init__(self):
         pass
 
-    def get_health(self, as_txt: bool = False) -> Union[Dict[str, Any], str]:
+    @staticmethod
+    def check_internet(host: str = "www.google.com", port: int = 80, timeout: int = 5) -> bool:
+        """
+        Check if the device has an active internet connection by attempting to connect to a 
+        specified host and port.
+
+        Parameters
+        ----------
+        host : str, optional
+            Hostname or IP address of the remote host you want to connect to. 
+            Defaults to "www.google.com".
+
+        port : int, optional
+            Port number on the remote host to which you want to connect.
+            Defaults to ``80`` (HTTP), which is commonly open and reachable on most web servers.
+
+        timeout : int, optional
+            Non-negative number expressing seconds. Subsequent socket operations will raise a 
+            timeout exception if the timeout period value has elapsed before the operation has 
+            completed. Defaults to 5.
+
+        Returns
+        -------
+        bool
+            whether the internet connection is available or not.
+        """
+        logger.debug("[Start] check_internet")
+        is_connected = False
+        try:
+            # Try to connect to the specified host and port with a timeout
+            socket.setdefaulttimeout(timeout)
+            socket.socket(
+                family=socket.AF_INET,  # Address family for IPv4.
+                type=socket.SOCK_STREAM # Socket type for TCP (which is a stream-oriented protocol)
+            ).connect((host, port))
+            is_connected = True
+            logger.info("Internet connection is available")
+        except Exception as e:
+            logger.warning(f"Could not establish internet connection: {e}")
+        logger.debug("[Finish] check_internet")
+        return is_connected
+
+
+    # TODO: Implement
+    def get_health(self, as_txt: bool = False) -> Union[dict, str]:
         """
         Get the health status of the computing device.
 
@@ -45,10 +90,59 @@ class ComputeDevice:
         dict | str
             A dictionary containing health metrics if `as_txt` is False, otherwise a formatted string.
         """
-        # Compute the CPU usage/temperature, memory RAM usage and disk usage (include warnings for limiting values)
+        logger.debug("[Start] get_raspi_status")
         
+        # Compute the CPU usage/temperature, memory RAM usage and disk usage (include warnings for limiting values)
+        try:
+            # Obtener temperatura de la CPU
+            cpu_temp = os.popen("vcgencmd measure_temp").readline().replace("temp=", "").replace("'C\n", "")
+            # temp_file = open("/sys/class/thermal/thermal_zone0/temp")
+            # temp_cpu = temp_file.read()
+            # temp_file.close()
+            # cpu_temp = float(temp_cpu)/1000
+            
+            # Obtener uso de la memoria RAM
+            ram_usage = psutil.virtual_memory().percent
+            
+            # Obtener espacio libre en disco
+            disk_free_space = psutil.disk_usage('/').free / (1024**3)  # Convierte a GB
+            
+            if as_txt:
+                # Texto de salida
+                state_txt = (
+                    f"Temperatura CPU: {cpu_temp}°C - "
+                    f"Uso de RAM: {ram_usage}% - "
+                    "Espacio disponible: "
+                )
 
-        return {}
+                # Crea el texto para el espacio en disco
+                if disk_free_space < 1: 
+                    disk_free_space *= 1000
+                    disk_txt = f"{disk_free_space:.2f} MB"
+                else:
+                    disk_txt = f"{disk_free_space:.2f} GB"
+                
+                # Completa la info en texto y asigna a variable de salida
+                state_txt += disk_txt
+                raspi_state = state_txt
+
+                # state_texts = []
+                # for state_name, state_value in raspi_state.items():
+                #     state_texts.append(f"{state_name}: {state_value}")
+                # raspi_state = " - ".join(state_texts)
+            else:
+                raspi_state = {
+                    "Temperatura CPU": cpu_temp, 
+                    "Uso de RAM": ram_usage, 
+                    "Espacio disponible": disk_free_space
+                }
+
+        except Exception as e:
+            logging.error(f"Excepcion al obtener el estado de la Raspberry Pi: {e}")
+            raspi_state = ""
+        
+        logger.debug("[Finish] get_raspi_status")
+        return raspi_state
 
     def log_health(self, level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"):
         """
@@ -62,12 +156,14 @@ class ComputeDevice:
         logging_fnc = getattr(logger, level.lower(), logger.info)
         logging_fnc(f"Computer health status: {self.get_health(as_txt=True)}")
 
+
     def current_datetime(self) -> datetime:
         return datetime.now()
 
     # TODO
     def available_disk_space(self, percent: bool = False) -> float:
         pass
+
 
     def serial_port_enabled(self) -> bool:
         """
