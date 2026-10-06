@@ -24,6 +24,7 @@ from src.utils import retry_process
 logger = logging.getLogger("MonitoringSystem")
 
 
+# TODO: Every time some configuration is updated, it should be saved in a JSON file to persist the changes across reboots and sessions.
 class SystemConfig():
     """
     Parameters
@@ -66,10 +67,15 @@ class SystemConfig():
         self.reference_dt: datetime = datetime.strptime(reference_dt, dt_format)
         self.sampling_interval: Tuple[datetime, datetime]
         self.set_sampling_interval(sampling_interval)
+        self.sampling_minutes: int = 30 # Default sampling duration in minutes for each monitoring session
 
         self.delta_minutes: float = delta_minutes
         self.is_enabled: bool = is_enabled
         self.min_disk_space: float = min_disk_space
+
+        self.session_series: int = 0  # Current session series number
+        self.series_digits: int = 8  # Number of digits for the session series number
+
         self.reboots: List[str] = []
 
     def _check_datetimes(self, datetimes: Dict[str, str]):
@@ -120,29 +126,154 @@ class SystemConfig():
         if self.sampling_interval[0] >= self.sampling_interval[1]:
             raise ValueError(f"Invalid sampling range: {interval}. The minimum must be less than the maximum.")
 
-    def is_ready(self) -> bool:
+    def _valid_computer_datetime(self, computer: ComputeDevice) -> bool:
+        """
+        Check if the computer's current datetime is valid based on the reference 
+        datetime and accepted delta in minutes.
+        
+        Parameters
+        ----------
+        computer : ComputeDevice
+            The computing device whose datetime is to be validated.
+        
+        Returns
+        -------
+        bool
+            True if the computer's datetime is valid, False otherwise.
+        """
+        now_dt = computer.current_datetime()
+        time_difference = abs((now_dt - self.reference_dt).total_seconds())
+        return time_difference < (self.delta_minutes * 60)
+
+    def ready_to_monitor(self, computer: ComputeDevice) -> bool:
         """
         Check if the monitoring system is ready for operation based on its configuration.
-        
+        Validations:
+
+        1.  **System enabled:** The monitoring system must be enabled for operation.
+        2.  **Computer disk space:** The computer must have sufficient free disk space.
+        3.  **Computer datetime:** The computer's datetime must be valid.
+        4.  **Sampling range:** The current time must be within the sampling range.
+
         Returns
         -------
         bool
             True if the system is ready, False otherwise.
         """
+        # Whether the monitoring system is ready for operation
         system_ready = True
-        current_time = datetime.now()
+        
+        # If current computer datetime is invalid, attempt to set it up automatically (e.g., via internet or GPS module)
+        if not self._valid_computer_datetime(computer):
+            retry_process(
+                process=lambda: computer.setup_datetime(),
+                success=lambda results: results,
+                max_retries=20,
+                retry_delay=10
+            )
+
     
-        # Check if the system is enabled
+        # System enabled for monitoring
+        # ---------------------------------
         if not self.is_enabled:
             logger.warning("Monitoring system is disabled.")
             system_ready = False
 
-        # Check if the current time is within the sampling range
-        elif not (self.sampling_interval[0] <= current_time <= self.sampling_interval[1]):
-            logger.warning(f"Current time '{current_time}' is outside the sampling range: {self.sampling_interval}.")
+
+        # Computer free disk space
+        # ---------------------------------
+        elif computer.available_disk_space(percent=False) < self.min_disk_space:
+            logger.error(
+                f"Insufficient disk space on the computing device. Required: {self.min_disk_space} GB, "
+                f"Available: {computer.available_disk_space(percent=False):.2f} GB."
+            )
             system_ready = False
 
+
+        # Computer valid datetime
+        # ---------------------------------
+        # Check again if setting up the computer's datetime was successful
+        elif not self._valid_computer_datetime(computer):
+            logger.error("Invalid computer datetime.")
+            system_ready = False
+
+
+        # Valid sampling range
+        # ---------------------------------
+        elif not (self.sampling_interval[0] <= computer.current_datetime() <= self.sampling_interval[1]):
+            logger.warning(
+                f"Current time '{computer.current_datetime()}' is outside "
+                f"the sampling interval: {self.sampling_interval}."
+            )
+            system_ready = False
+
+
+        # Update the reference datetime in the monitoring system configuration
+        # This is done to ensure that the reference datetime is always up-to-date 
+        # with the computer's current datetime.
+        now_dt = computer.current_datetime()
+        self.set_reference_datetime(now_dt.strftime(self.dt_format))
+
         return system_ready
+
+    def get_session_series(self, update: bool = False, as_txt: bool = False) -> Union[int, str]:
+        """
+        Get the current session series number, optionally updating it for the next session creation.
+
+        Parameters
+        ----------
+        update : bool, optional
+            If True, increment the session series number. 
+            Defaults to False.
+        
+        as_txt : bool, optional
+            If True, return the session series number as a string based on the number of digits specified. 
+            Defaults to False.
+
+        Returns
+        -------
+        int | str
+            The current session series number.
+        """
+        current_series = self.session_series
+        
+        if update:
+            self.session_series += 1
+        
+        if as_txt:
+            current_series = str(current_series).zfill(self.series_digits)
+        
+        return current_series
+
+    # TODO: Implement
+    def create_session(self, computer: ComputeDevice) -> Dict[str, str]:
+        """
+        1. Create a session ID
+        2. Create a session path to save outputs
+        3. Update serial for the next session creation
+        
+        Returns
+        -------
+        dict
+            Dictionary with a new monitoring session:
+            
+            * ``id``: Formatted name to save the session ID. Example: 05110004_21_09_14_16_17
+            * ``path``: Path to save the session outputs. Example: .../data/monitoring/sessions/05110004_21_09_14_16_17
+        """
+        logger.debug("[Start] create_session")
+
+        datetime_str = computer.current_datetime().strftime(self.dt_format)
+        series_str = self.get_session_series(update=True, as_txt=True)
+        session_id = f"{series_str}_{datetime_str}"
+
+        # TODO: Base path must be taken from a repository configuration
+        session_path = Path(...) / session_id
+
+        logger.debug("[Finish] create_session")
+        return {
+            "id": session_id,
+            "path": session_path.as_posix()
+        }
 
 
 # TODO: Implement repository handling for saving recording data, snapshots, and metadata
@@ -248,47 +379,12 @@ class MonitoringSystem:
 
         return snapshots
 
-    def ready_to_monitor(self) -> bool:
-        # Available computer disk space
-        # ---------------------------------
-        if self.computer.available_disk_space(percent=False) > self.config.min_disk_space:
-            logger.error("Insufficient disk space on the computing device. Aborting monitoring session.")
-            return False
-
-
-        # Computer device datetime
-        # ---------------------------------
-        time_delta = self.config.delta_minutes * 60
-        time_ref = self.config.reference_dt
-        computer_time_ok = abs((self.computer.current_datetime() - time_ref).total_seconds()) < time_delta
-        if not computer_time_ok:
-            # Retry setting the computer datetime and check datetime consistency
-            retry_process(
-                process=lambda: self.computer.setup_datetime(),
-                success=lambda results: results,
-                max_retries=20,
-                retry_delay=10
-            )
-            computer_time_ok = abs((self.computer.current_datetime() - time_ref).total_seconds()) < time_delta
-        if not computer_time_ok:
-            logger.error("Invalid computer datetime. Aborting monitoring session.")
-            return False
-        else:
-            # Update the reference datetime in the monitoring system configuration
-            now_datetime = self.computer.current_datetime()
-            self.config.set_reference_datetime(now_datetime.strftime(self.config.dt_format))
-
-
-        # Monitoring system operability
-        # ---------------------------------
-        if not self.config.is_ready():
-            logger.error("Monitoring system is not ready. Aborting monitoring session.")
-            return False
-
-
-        # Cameras operability
-        # ---------------------------------
+    def cameras_ready(self) -> bool:
+        """
+        Check if all cameras in the monitoring system are ready for operation.
+        """
         # TODO: We could let the monitoring process start with at least one camera ready
+
         # Check if all cameras are ready for monitoring, retrying if necessary
         cameras_ready = retry_process(
             process=lambda: [ camera.is_ready() for camera in self.cameras.values() ],
@@ -297,87 +393,50 @@ class MonitoringSystem:
             retry_delay=30,
             on_retry=lambda attempt, max_retires: logger.warning(f"Retrying cameras setup ({attempt}/{max_retires})"),
         )
-        if not cameras_ready:
-            logger.error("Could not set up cameras successfully. Aborting monitoring session.")
-            return False
-
-        return True
-
-    # TODO: Implement 
-    def _get_session_id(self) -> str:
-        """
-        Get the session ID to save outputs. Note that this function also update the "serie" data from the
-        config_data["system"].
-
-        Parameters
-        ----------
-        config_data : dict
-        Dictionary with all configuration data for the monitoring system.
-
-        Returns
-        -------
-        name : str
-            Formatted name to save the session ID. Example: 05110004_21_09_14_16_17
-        """
-        logger.debug("[Start] _get_session_id")
-
-        # Get date and time in the config defined format
-        datetime_str = self.computer.current_datetime().strftime(self.config.dt_format)
-
-        # Obtiene el número de serie actual y la cantidad de digits a formatear
-        serie = config_data["system"]["serie"]
-        n_digits = config_data["system"]["serie_digits"]
-
-        # Numero de serie formateado
-        serie_str = str(serie).zfill(n_digits)
-
-        # Actualiza el número de serie en la unidad
-        config_data["system"]["serie"] += 1
-
-        # Sobreescribe el archivo JSON con la información actualizada
-        save_json_file(settings.MONITORING_CONFIG_FPATH, config_data)
-        logger.info(f"Serie de monitoreo actualizada: {config_data['system']['serie']}")
-
-        # Obtiene el formato para las coordenadas geográficas
-        # coords_str = format_coordinates(
-        #     latitude=config_data["system"]["geo_coords"]["lat"], 
-        #     longitude=config_data["system"]["geo_coords"]["long"]
-        # )
-
-        logger.debug("[Finish] _get_session_id")
-        return f"{serie_str}_{datetime_str}"  # _{coords_str}"
+        
+        return cameras_ready
 
     # TODO: Implement
-    def _record_and_save(self, session_id: str):
+    def _record_and_save(self, session_data: Dict[str, str]):
         """
         Process of recording and saving data from all cameras in the monitoring system concurrently or in parallel.
         
         Parameters
         ----------
-        session_id : str
-            The unique identifier of the monitoring session, used to name the output files.
+        session_data : Dict[str, str]
+            A dictionary containing the session data, including the session ID and path.
         """        
+        # Get session data
+        session_id = session_data["id"]
+        session_path = Path(session_data["path"])
+
         # List concurrent or parallel tasks to be executed
         parallel_tasks: List[threading.Thread] = []
 
         # Create a recording and saving task for each camera in the monitoring system
         for camera_id, camera in self.cameras.items():
             # Prepare output file path for camera data (images or video) 
-            out_path = Path(...)
+            out_path = session_path / f"camera_{camera_id}" ??
             out_file = out_path / f"{session_id}.{asset_extension}"
             out_path.mkdir(parents=True, exist_ok=True)
 
             # Connect the camera device
             camera.device.connect()
 
-            # Creates the camera recording thread 
+            # Prepare the capture function and its keyword arguments for the camera
+            capture_fnc = camera.device.capture_video
+            capture_kwargs = dict(
+                duration=self.config.sampling_minutes*60, 
+                out_file=out_file, 
+                frames=False, 
+                max_fails=3
+            )
+
+            # Include the camera recording thread 
             #   * Concurrent: threading.Thread(target, kwargs)
             #   * Parallel: multiprocessing.Process(target, kwargs)
             # Internally, the thread will call: self._target(*self._args, **self._kwargs)
-            parallel_tasks.append(threading.Thread(
-                target=camera.device.capture_video, 
-                kwargs=dict(duration=, out_file=out_file, frames=False, max_fails=3) # TODO
-            ))
+            parallel_tasks.append( threading.Thread(target=capture_fnc, kwargs=capture_kwargs) )
 
         # Start all concurrent or parallel tasks
         t0 = time.perf_counter()
@@ -403,26 +462,36 @@ class MonitoringSystem:
         """
         Main monitoring process that orchestrates the following steps:
 
-        1. Check if all cameras are ready for monitoring, retrying if necessary.
-        2. Get the recording name based on the current configuration data.
-        3. Start recording and saving data from all cameras concurrently or in parallel.
-        4. Log the monitoring results and device health status.
+        1. Get the recording name based on the current configuration data.
+        2. Start recording and saving data from all cameras concurrently or in parallel.
+        3. Log the monitoring results and device health status.
+
+        The monitoring can be aborted in these cases:
+
+        * The monitoring system is not ready for operation (based on system configuration).
+        * Not all cameras are ready for monitoring.
         
         Generated media assets will be saved in ?? TODO
         """
         logger.debug("[Start] start_monitoring")
 
         # Check if the monitoring system is ready for operation
-        if not self.ready_to_monitor():
-            logger.warning("Monitoring system is not ready for operation")
+        if not self.config.ready_to_monitor(computer=self.computer):
+            logger.warning("Monitoring system is not ready for operation. Aborting monitoring session.")
+        
+        # Check if all cameras are ready for monitoring
+        elif not self.cameras_ready():
+            logger.error("Could not set up cameras successfully. Aborting monitoring session.")
+        
+        # Execute the monitoring process
         else:
             # Get a session ID based on the current configuration data
-            session_id = self._get_session_id()
-            logger.info(f"Monitoring session: {session_id}")
+            session_data = self.config.create_session(computer=self.computer)
+            logger.info(f"Monitoring session created: {session_data}")
 
             # Start recording and saving data
             self.computer.log_health(level="INFO")
-            self._record_and_save(session_id)
+            self._record_and_save(session_data)
             self.computer.log_health(level="INFO")
         
         logger.debug("[Finish] start_monitoring")
