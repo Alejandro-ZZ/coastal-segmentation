@@ -59,19 +59,19 @@ class SystemConfig():
         self.dt_format: str = dt_format
         self._check_datetimes({
             "reference": reference_dt,
-            "minimum sampling range": sampling_interval[0],
-            "maximum sampling range": sampling_interval[1]
+            "minimum sampling interval": sampling_interval[0],
+            "maximum sampling interval": sampling_interval[1]
         })
 
-        # Set the reference datetime and sampling range
+        # Set the reference datetime and sampling interval
         self.reference_dt: datetime = datetime.strptime(reference_dt, dt_format)
         self.sampling_interval: Tuple[datetime, datetime]
         self.set_sampling_interval(sampling_interval)
         self.sampling_minutes: int = 30 # Default sampling duration in minutes for each monitoring session
 
-        self.delta_minutes: float = delta_minutes
-        self.is_enabled: bool = is_enabled
-        self.min_disk_space: float = min_disk_space
+        self.delta_minutes: float = delta_minutes   # Maximum allowed difference in minutes between the computer's current datetime and the reference datetime
+        self.is_enabled: bool = is_enabled          # Whether the monitoring system is enabled or not
+        self.min_disk_space: float = min_disk_space # Minimum disk space needed (in GB) for a monitoring session
 
         self.session_series: int = 0  # Current session series number
         self.series_digits: int = 8  # Number of digits for the session series number
@@ -107,7 +107,7 @@ class SystemConfig():
 
     def set_sampling_interval(self, interval: Tuple[str, str]):
         """
-        Set the sampling range for the monitoring system.
+        Set the sampling interval for the monitoring system.
         
         Parameters
         ----------
@@ -116,15 +116,15 @@ class SystemConfig():
             in the format specified by `dt_format`.
         """
         self._check_datetimes({
-            "minimum sampling range": interval[0],
-            "maximum sampling range": interval[1]
+            "minimum sampling interval": interval[0],
+            "maximum sampling interval": interval[1]
         })
         self.sampling_interval = (
             datetime.strptime(interval[0], self.dt_format),
             datetime.strptime(interval[1], self.dt_format)
         )
         if self.sampling_interval[0] >= self.sampling_interval[1]:
-            raise ValueError(f"Invalid sampling range: {interval}. The minimum must be less than the maximum.")
+            raise ValueError(f"Invalid sampling interval: {interval}. The minimum must be less than the maximum.")
 
     def _valid_computer_datetime(self, computer: ComputeDevice) -> bool:
         """
@@ -153,8 +153,7 @@ class SystemConfig():
         1.  **System enabled:** The monitoring system must be enabled for operation.
         2.  **Computer disk space:** The computer must have sufficient free disk space.
         3.  **Computer datetime:** The computer's datetime must be valid.
-        4.  **Sampling range:** The current time must be within the sampling range.
-
+        4.  **Sampling interval:** The current time must be within the sampling interval.
         Returns
         -------
         bool
@@ -198,7 +197,8 @@ class SystemConfig():
             system_ready = False
 
 
-        # Valid sampling range
+
+        # Valid sampling interval
         # ---------------------------------
         elif not (self.sampling_interval[0] <= computer.current_datetime() <= self.sampling_interval[1]):
             logger.warning(
