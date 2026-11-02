@@ -158,18 +158,30 @@ def estimator_io(
     return output
 
 
-def get_column_names(n_neighbors: int, color_space: str) -> List[str]:
+
+def get_column_names(n_neighbors: int, colorspace: str, *, start: int = 0, sep: str = "") -> List[str]:
     """
     Generate a list of names to represent color channels based on the number of neighbors and color space.
+    Total number of names generated is defined as::
+        
+        (n_neighbors + 1) * len(color_space).
 
     Parameters
     ----------
     n_neighbors : int
-        The number of neighboring points to consider. Names are generated from 0 to `n_neighbors` inclusive.
+        The number of neighboring points to consider. Index values are generated from `start` 
+        to `n_neighbors + start` inclusive.
 
-    color_space : str, optional
+    colorspace : str, optional
         A string of three characters representing the color channels (e.g., "rgb" for red, green, and blue channels).
-        Default is "rgb".
+        Character are case sensitive, so ``colorspace="RGB"`` will generate names with uppercase letters, 
+        while ``colorspace="rgb"`` will generate names with lowercase letters.
+
+    start : int, optional
+        The starting index for the neighbor numbers. Default is 0.
+
+    sep : str, optional
+        The separator to use between the color channel and the neighbor number. Default is an empty string.
 
     Raises
     ------
@@ -183,33 +195,44 @@ def get_column_names(n_neighbors: int, color_space: str) -> List[str]:
 
     Example
     -------
-        >>> get_column_names(n_neighbors=3, color_space="rgb")
+        >>> get_column_names(n_neighbors=8, color_space="rgb", sep="_")
         [
             "r_0", "g_0", "b_0",
             "r_1", "g_1", "b_1",
             "r_2", "g_2", "b_2",
-            "r_3", "g_3", "b_3"
+            "r_3", "g_3", "b_3",
+            ...,
+            "r_8", "g_8", "b_8"
+        ]
+
+        >>> get_column_names(n_neighbors=8, color_space="RGB", start=1)
+        [
+            "R1", "G1", "B1",
+            "R2", "G2", "B2",
+            "R3", "G3", "B3",
+            ...,
+            "R8", "G8", "B8",
+            "R9", "G9", "B9"
         ]
     """
     # Check input parameters
-    if len(color_space) != 3:
-        raise ValueError(f"Invalid color space `{color_space}`. Must be a three characters string.")
-    elif not color_space.isalpha():
-        raise ValueError(f"Invalid color space `{color_space}`. Must be an alphabetic string.")
+    if len(colorspace) != 3:
+        raise ValueError(f"Invalid color space `{colorspace}`. Must be a three characters string.")
+    elif not colorspace.isalpha():
+        raise ValueError(f"Invalid color space `{colorspace}`. Must be an alphabetic string.")
 
     # Get the color space characters
     # color_space = color_space.lower()
-    char1, char2, char3 = [char for char in color_space.upper()]
+    # char1, char2, char3 = [char for char in colorspace.upper()]
 
     # Create the output name list
-    column_names = [char1, char2, char3]
-    for neighbor_num in range(1, n_neighbors + 1):
-        neighbor_str = str(neighbor_num)
-        column_names.extend([
-            f"{char1}{neighbor_str}",
-            f"{char2}{neighbor_str}",
-            f"{char3}{neighbor_str}"
-        ])
+    # column_names = [char1, char2, char3]
+    column_names: List[str] = []
+    for idx in range(start, n_neighbors + start + 1):
+        column_names.extend(
+            f"{color_char}{sep}{idx}" 
+            for color_char in colorspace
+        )
 
     return column_names
 
