@@ -15,6 +15,9 @@ from ml_engine.optuna.base_optimizer import OptunaParamSpec
 from ml_engine.optuna.sklearn_optimizer import SklearnOptunaOptimizer
 from ml_engine.datasets.base_dataset import OptimizationData
 
+# Local imports (current project)
+from src.utils import get_column_names, save_json_file
+
 
 logger = logging.getLogger("Optimization")
 
@@ -72,25 +75,21 @@ class NeighborsDataset(OptimizationData):
 
         return df.set_index(self.split_col)
 
-    def get_split_data(self, value: str) -> Tuple[NDArray, NDArray]:
-        """Retrieve the dataset's features (x) and labels (y) for a given split as a tuple (x, y)."""
-        if value not in self.df.index:
-            raise ValueError(f"Split value '{value}' not found in dataset '{self.split_col}' column.")
-        
-        split_df = self.df.loc[value]
-        x = split_df[self.features].to_numpy()
-        y = split_df[self.targets].to_numpy().squeeze()  # Ensure ``y`` is a 1D array if it has a single column
-        return x, y
 
     def uses_validation(self) -> bool:
         """Indicates whether the dataset provides a separate validation set."""
         return self.validate_value in self.df.index
 
-    def train_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
-        return self.get_split_data(self.train_value)
 
-    def evaluate_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
-        return self.get_split_data(self.validate_value)
+    def optimization_data(self, train: bool, **kwargs) -> Tuple[NDArray, NDArray]:
+        split_value = self.train_value if train else self.validate_value
+        if split_value not in self.df.index:
+            raise ValueError(f"Split value '{split_value}' not found in dataset '{self.split_col}' column.")
+        
+        split_df = self.df.loc[split_value]
+        x = split_df[self.features].to_numpy()
+        y = split_df[self.targets].to_numpy().squeeze()  # Ensure ``y`` is a 1D array if it has a single column
+        return x, y
 
 
 # EXPERIMENT DATA FUNCTIONS
@@ -155,15 +154,25 @@ def get_dataset(n_neighbors: int) -> OptimizationData:
     return NeighborsDataset(
         path=dataset_path,
         split_col="Split",
-        features=features,
-        targets=["ClassId"],
+        features=get_column_names(n_neighbors, "RGB"),
+        targets="ClassId",
         train_value="train",
         evaluate_value="test"
     )
 
 
-def get_study_config() -> dict:
-    """Study configuration parameters for Optuna optimization."""
+def get_study_config(experiment_id: str, output_path: Path) -> dict:
+    """
+    Study configuration parameters for Optuna optimization.
+    
+    Parameters
+    ----------
+    experiment_id : str
+        Unique identifier for the optimization experiment. Used to name the study.
+
+    output_path : Path
+        Directory where the Optuna study database will be stored: ``{output_path}/optuna_studies.db``.
+    """
     # The pruner stops unpromising trials early (not used and dummy for our purposes)
     # Hyperband paper: https://www.jmlr.org/papers/volume18/16-558/16-558.pdf
     #   *     `min_resource` -> is the minimum number of steps (epochs) the model need to start converge
@@ -193,10 +202,10 @@ def get_study_config() -> dict:
     # Study data
     estimator_type = type(estimator).__name__
     storage_url = f"sqlite:///{output_path}/optuna_studies.db"
-    study_name = f"RGB_Segmenter_{n_neighbors}NN_{estimator_type}"
+    # study_name = f"RGB_Segmenter_{n_neighbors}NN_{estimator_type}"
 
     return dict(
-        name=study_name,
+        name=experiment_id,
         storage_url=storage_url,
         sampler=sampler,
         pruner=pruner,
@@ -224,7 +233,8 @@ if __name__ == "__main__":
     )
 
     # Study setup for the optimization process
-    study_config = get_study_config()
+    experiment_id = f"CoastalSegmenter_{n_neighbors}NN_{type(estimator).__name__}"
+    study_config = get_study_config(experiment_id, output_path)
     optimizer.setup_study( **study_config )
     logger.info(
         f"Study setup completed: "
@@ -242,26 +252,27 @@ if __name__ == "__main__":
         optimizer.optimize(n_trials=n_trials, timeout=None, n_jobs=1)
     except Exception as e:
         logger.error(f"Failed to optimize: {str(e)}")
-        import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace(header="Error during optimization")
         raise e
 
     # Save the optimizer info
     try:
-        results_file = output_path / f"{n_neighbors}NN_{estimator_type}_results.parquet"
-        info_file = output_path / f"{n_neighbors}NN_{estimator_type}_metadata.json"
+        results_file = output_path / f"{experiment_id}_results.parquet"
+        info_file = output_path / f"{experiment_id}_metadata.json"
         
-        cv_results = optimize_dataframe_dtypes(df=optimizer.cv_results_)
+        # cv_results = optimize_dataframe_dtypes(df=optimizer.cv_results_)
+        cv_results = optimizer.cv_results_
         cv_results.to_parquet(path=results_file, index=False)
         logger.info(f"Optimization results saved to: '{results_file.as_posix()}'")
 
-        save_json_file(info_file, optimizer.optimizer_info)
+        save_json_file(info_file, optimizer.metadata)
         logger.info(f"Optimizer metadata saved to: '{info_file.as_posix()}'")
     except Exception as e:
         logger.error(f"Failed to save optimization data: {str(e)}")
-        import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace(header="Error saving optimization data")
         raise e
 
     from pprint import pprint
     print("\nOptimizer info:")
-    pprint(optimizer.optimizer_info, indent=2, sort_dicts=False)
+    pprint(optimizer.metadata, indent=2, sort_dicts=False)
     print()
