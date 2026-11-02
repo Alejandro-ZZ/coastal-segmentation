@@ -1,8 +1,10 @@
 import logging
+import pandas
 
 from pathlib import Path
-from typing import List
+from typing import List, Tuple, Union
 
+from numpy.typing import NDArray, ArrayLike
 from optuna.pruners import HyperbandPruner
 from optuna.samplers import TPESampler
 from sklearn.base import BaseEstimator
@@ -11,10 +13,84 @@ from sklearn.ensemble import RandomForestClassifier
 # Local imports from: https://github.com/Alejandro-ZZ/machine-learning
 from ml_engine.optuna.base_optimizer import OptunaParamSpec
 from ml_engine.optuna.sklearn_optimizer import SklearnOptunaOptimizer
-from ml_engine.datasets.base_dataset import BaseDataset
+from ml_engine.datasets.base_dataset import OptimizationData
 
 
 logger = logging.getLogger("Optimization")
+
+
+# EXPERIMENT DATASET
+# ============================================
+class NeighborsDataset(OptimizationData):
+    """Dataset for the Pixel-wise Segmenter experiment."""
+    def __init__(
+            self, 
+            path: Path, 
+            split_col: str, 
+            features: List[str],
+            targets: Union[str, List[str]],
+            train_value: str = "train",
+            evaluate_value: str = "test"
+        ):
+        # Data about the dataset splits
+        self.split_col = split_col
+        self.train_value = train_value
+        self.validate_value = evaluate_value
+
+        # Features (x) and target (y) columns
+        self.features = features
+        self.targets = targets if isinstance(targets, list) else [targets]
+
+        # Dataset loading
+        self.df = self.load_dataset(path)
+    
+
+    def load_dataset(self, path: Path) -> pandas.DataFrame:
+        # Load the dataset
+        try:
+            file_extension = path.suffix.lower()
+            if file_extension == ".parquet":
+                df = pandas.read_parquet(path)
+            elif file_extension == ".csv":
+                df = pandas.read_csv(path)
+            else:
+                raise ValueError(f"Unsupported file format: {file_extension}")
+        except Exception as e:
+            raise ValueError(f"Failed to load dataset from '{path}': {str(e)}")
+
+        # Check for required columns in the dataset 
+        required_values = set([self.split_col] + self.features + self.targets)
+        missing_values = required_values - set(df.columns)
+        if missing_values:
+            raise ValueError(f"Missing required columns in dataset: {missing_values}")
+
+        # Check for required split values in the dataset
+        required_values = set([self.train_value, self.validate_value])
+        missing_values = required_values - set(df[self.split_col])
+        if missing_values:
+            raise ValueError(f"Missing required split values in '{self.split_col}' column: {missing_values}")
+
+        return df.set_index(self.split_col)
+
+    def get_split_data(self, value: str) -> Tuple[NDArray, NDArray]:
+        """Retrieve the dataset's features (x) and labels (y) for a given split as a tuple (x, y)."""
+        if value not in self.df.index:
+            raise ValueError(f"Split value '{value}' not found in dataset '{self.split_col}' column.")
+        
+        split_df = self.df.loc[value]
+        x = split_df[self.features].to_numpy()
+        y = split_df[self.targets].to_numpy().squeeze()  # Ensure ``y`` is a 1D array if it has a single column
+        return x, y
+
+    def uses_validation(self) -> bool:
+        """Indicates whether the dataset provides a separate validation set."""
+        return self.validate_value in self.df.index
+
+    def train_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
+        return self.get_split_data(self.train_value)
+
+    def evaluate_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
+        return self.get_split_data(self.validate_value)
 
 
 # EXPERIMENT DATA FUNCTIONS
@@ -72,9 +148,18 @@ def get_model_specs() -> List[OptunaParamSpec]:
     ]
 
 
-def get_dataset() -> BaseDataset:
+def get_dataset(n_neighbors: int) -> OptimizationData:
     """Load the dataset for optimization."""
-    pass
+    dataset_path = Path("assets/datasets/PHCO") / f"neighbors_{n_neighbors}NN.parquet"
+    
+    return NeighborsDataset(
+        path=dataset_path,
+        split_col="Split",
+        features=features,
+        targets=["ClassId"],
+        train_value="train",
+        evaluate_value="test"
+    )
 
 
 def get_study_config() -> dict:
@@ -135,7 +220,7 @@ if __name__ == "__main__":
         params=get_model_specs(),
         metrics={"f1_macro": "maximize"},
         estimator=estimator,
-        dataset=get_dataset()
+        dataset=get_dataset(n_neighbors)
     )
 
     # Study setup for the optimization process
